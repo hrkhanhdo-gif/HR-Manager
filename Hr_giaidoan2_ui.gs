@@ -294,7 +294,7 @@ function buildFullApp(user, activePage) {
   * { box-sizing:border-box; margin:0; padding:0; }
   body { font-family:'Be Vietnam Pro',sans-serif; background:var(--bg); color:var(--text-1); font-size:14px; min-height:100vh; display:flex; }
 
-  /* ── SIDEBAR ── */
+  /* SIDEBAR */
   .sidebar {
     width: var(--sidebar-w); min-height:100vh; background:var(--text-1);
     display:flex; flex-direction:column; position:fixed; left:0; top:0; bottom:0; z-index:100;
@@ -328,7 +328,7 @@ function buildFullApp(user, activePage) {
     background:rgba(141,127,240,0.3); color:#c4beff; letter-spacing:0.05em; text-transform:uppercase;
   }
 
-  /* ── MAIN ── */
+  /* MAIN */
   .main { margin-left:var(--sidebar-w); flex:1; min-height:100vh; display:flex; flex-direction:column; }
   .topbar {
     background:var(--surface); border-bottom:1px solid var(--border);
@@ -339,7 +339,7 @@ function buildFullApp(user, activePage) {
   .topbar-actions { display:flex; gap:8px; align-items:center; }
   .content { padding:28px; flex:1; }
 
-  /* ── CARDS & METRIC ── */
+  /* Các style còn lại giữ nguyên từ GĐ2 (metrics, cards, tables, modals, toast, ...) */
   .metrics-row { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }
   .metric-card {
     background:var(--surface); border-radius:var(--radius); padding:20px 22px;
@@ -359,7 +359,6 @@ function buildFullApp(user, activePage) {
   .metric-delta.down { color:var(--red); }
   .metric-icon { position:absolute; right:18px; top:18px; font-size:22px; opacity:0.15; }
 
-  /* ── GRID LAYOUT ── */
   .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:20px; }
   .grid-3 { display:grid; grid-template-columns:2fr 1fr; gap:20px; margin-bottom:20px; }
   .panel {
@@ -373,7 +372,6 @@ function buildFullApp(user, activePage) {
   .panel-title { font-size:13px; font-weight:600; color:var(--text-1); }
   .panel-body { padding:16px 20px; }
 
-  /* ── TABLE ── */
   .data-table { width:100%; border-collapse:collapse; }
   .data-table th {
     text-align:left; font-size:11px; color:var(--text-3); font-weight:500;
@@ -390,7 +388,6 @@ function buildFullApp(user, activePage) {
     margin-right:8px; flex-shrink:0; vertical-align:middle;
   }
 
-  /* ── STATUS BADGES ── */
   .status {
     display:inline-block; font-size:11px; padding:3px 9px; border-radius:20px; font-weight:500; white-space:nowrap;
   }
@@ -402,7 +399,6 @@ function buildFullApp(user, activePage) {
   .s-tu-choi    { background:var(--red-l);    color:#791F1F; }
   .s-da-nghi    { background:#F1EFE8; color:#444; }
 
-  /* ── BUTTONS ── */
   .btn {
     display:inline-flex; align-items:center; gap:6px; padding:7px 14px;
     border-radius:7px; font-size:13px; font-weight:500; cursor:pointer;
@@ -415,7 +411,6 @@ function buildFullApp(user, activePage) {
   .btn-sm { padding:5px 10px; font-size:12px; }
   .btn-danger { background:var(--red-l); color:var(--red); border:1px solid rgba(192,57,43,0.2); }
 
-  /* ── FORM / MODAL ── */
   .overlay {
     position:fixed; inset:0; background:rgba(0,0,0,0.4); z-index:200;
     display:none; align-items:center; justify-content:center;
@@ -445,7 +440,6 @@ function buildFullApp(user, activePage) {
   .form-control:focus { border-color:var(--accent); background:#fff; }
   select.form-control { cursor:pointer; }
 
-  /* ── PIPELINE VISUAL ── */
   .pipeline { display:flex; align-items:center; gap:0; margin:12px 0; }
   .pipe-step {
     flex:1; text-align:center; padding:8px 4px; background:var(--bg);
@@ -458,13 +452,11 @@ function buildFullApp(user, activePage) {
   .pipe-step.active { background:var(--accent-l); border-color:var(--accent); }
   .pipe-step.active .pipe-count { color:var(--accent); }
 
-  /* ── BIRTHDAY CARD ── */
   .bday-item { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); }
   .bday-item:last-child { border-bottom:none; }
   .bday-days { font-size:11px; color:var(--text-3); min-width:50px; text-align:right; }
   .bday-days.today { color:var(--amber); font-weight:600; }
 
-  /* ── AUDIT TABLE ── */
   .audit-action {
     display:inline-block; font-size:10px; padding:2px 7px; border-radius:4px;
     font-weight:600; text-transform:uppercase; letter-spacing:0.05em;
@@ -475,7 +467,6 @@ function buildFullApp(user, activePage) {
   .a-LOGIN  { background:#E6F1FB; color:#185FA5; }
   .a-ERROR  { background:var(--coral-l); color:#712B13; }
 
-  /* ── TOAST ── */
   .toast {
     position:fixed; bottom:24px; right:24px; z-index:999;
     background:var(--text-1); color:#fff; padding:12px 18px; border-radius:9px;
@@ -486,16 +477,13 @@ function buildFullApp(user, activePage) {
   .toast.success { background:#1D9E75; }
   .toast.error   { background:#C0392B; }
 
-  /* ── PAGE VIEWS ── */
   .view { display:none; animation:fadeIn 0.2s ease; }
   .view.active { display:block; }
   @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
 
-  /* ── LOADING ── */
   .skeleton { background:linear-gradient(90deg,var(--border) 25%,rgba(0,0,0,0.04) 50%,var(--border) 75%); background-size:200%; animation:shimmer 1.2s infinite; border-radius:4px; }
   @keyframes shimmer { 0%{background-position:200%} 100%{background-position:-200%} }
 
-  /* ── RESPONSIVE ── */
   @media(max-width:900px) {
     .metrics-row { grid-template-columns:1fr 1fr; }
     .grid-2, .grid-3 { grid-template-columns:1fr; }
@@ -512,9 +500,7 @@ function buildFullApp(user, activePage) {
 </head>
 <body>
 
-<!-- ═══════════════════════════════════════════
-     SIDEBAR
-════════════════════════════════════════════ -->
+<!-- SIDEBAR (ĐÃ CÓ GĐ4 + GĐ5) -->
 <aside class="sidebar">
   <div class="sidebar-logo">
     <div class="logo-text">HR Workspace</div>
@@ -535,6 +521,28 @@ function buildFullApp(user, activePage) {
     <div class="nav-item ${activePage==='phongvan'?'active':''}" onclick="showView('phongvan')">
       <span class="nav-icon">◷</span> Phỏng vấn
     </div>
+
+    <!-- GĐ4 -->
+    <div class="nav-section">Hiệu suất</div>
+    <div class="nav-item ${activePage==='onboarding'?'active':''}" onclick="showView('onboarding')">
+      <span class="nav-icon">📋</span> Onboarding
+    </div>
+    <div class="nav-item ${activePage==='kpi'?'active':''}" onclick="showView('kpi')">
+      <span class="nav-icon">🎯</span> KPI & Hiệu suất
+    </div>
+
+    <!-- GĐ5 -->
+    <div class="nav-section">Tài chính & Báo cáo</div>
+    <div class="nav-item ${activePage==='payroll'?'active':''}" onclick="showView('payroll')">
+      <span class="nav-icon">💰</span> Bảng lương
+    </div>
+    <div class="nav-item ${activePage==='leave'?'active':''}" onclick="showView('leave')">
+      <span class="nav-icon">🌴</span> Nghỉ phép
+    </div>
+    <div class="nav-item ${activePage==='reports'?'active':''}" onclick="showView('reports')">
+      <span class="nav-icon">📊</span> Báo cáo HR
+    </div>
+
     ${isAdmin ? `
     <div class="nav-section">Quản trị</div>
     <div class="nav-item ${activePage==='auditlog'?'active':''}" onclick="showView('auditlog')">
@@ -547,9 +555,7 @@ function buildFullApp(user, activePage) {
   </div>
 </aside>
 
-<!-- ═══════════════════════════════════════════
-     MAIN CONTENT
-════════════════════════════════════════════ -->
+<!-- MAIN -->
 <main class="main">
   <div class="topbar">
     <span class="page-title" id="page-title">Dashboard</span>
@@ -562,7 +568,7 @@ function buildFullApp(user, activePage) {
   </div>
   <div class="content">
 
-    <!-- ─── VIEW: DASHBOARD ─── -->
+    <!-- VIEW DASHBOARD -->
     <div id="view-dashboard" class="view active">
       <div class="metrics-row" id="metrics-row">
         <div class="metric-card purple skeleton" style="height:100px"></div>
@@ -599,7 +605,7 @@ function buildFullApp(user, activePage) {
       </div>
     </div>
 
-    <!-- ─── VIEW: NHÂN SỰ ─── -->
+    <!-- VIEW NHÂN SỰ -->
     <div id="view-nhansu" class="view">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
         <input type="text" class="search-input" placeholder="Tìm nhân sự..." oninput="filterTable('ns-table',this.value)">
@@ -613,7 +619,7 @@ function buildFullApp(user, activePage) {
       </div>
     </div>
 
-    <!-- ─── VIEW: ỨNG VIÊN ─── -->
+    <!-- VIEW ỨNG VIÊN -->
     <div id="view-ungvien" class="view">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
         <input type="text" class="search-input" placeholder="Tìm ứng viên..." oninput="filterTable('uv-table',this.value)">
@@ -627,7 +633,7 @@ function buildFullApp(user, activePage) {
       </div>
     </div>
 
-    <!-- ─── VIEW: PHỎNG VẤN ─── -->
+    <!-- VIEW PHỎNG VẤN -->
     <div id="view-phongvan" class="view">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
         <span style="font-size:13px;color:var(--text-2);">Lịch phỏng vấn sắp tới</span>
@@ -641,7 +647,7 @@ function buildFullApp(user, activePage) {
       </div>
     </div>
 
-    <!-- ─── VIEW: AUDIT LOG ─── -->
+    <!-- VIEW AUDIT LOG -->
     ${isAdmin ? `
     <div id="view-auditlog" class="view">
       <div style="margin-bottom:16px;display:flex;align-items:center;gap:12px;">
@@ -656,7 +662,16 @@ function buildFullApp(user, activePage) {
       </div>
     </div>` : ''}
 
-  </div><!-- /content -->
+    <!-- GĐ4 TABS -->
+    ${getOnboardingTabHtml()}
+    ${getKpiTabHtml()}
+
+    <!-- GĐ5 TABS (Payroll + Leave + Reports) -->
+    ${getPayrollTabHtml()}
+    ${getLeaveTabHtml()}
+    ${getReportsTabHtml()}
+
+  </div>
 </main>
 
 
@@ -783,24 +798,34 @@ function buildFullApp(user, activePage) {
      JAVASCRIPT
 ════════════════════════════════════════════ -->
 <script>
-const PAGE_TITLES = { dashboard:'Dashboard', nhansu:'Nhân sự', ungvien:'Ứng viên', phongvan:'Lịch phỏng vấn', auditlog:'Audit Log' };
+const PAGE_TITLES = { dashboard:'Dashboard', nhansu:'Nhân sự', ungvien:'Ứng viên', phongvan:'Lịch phỏng vấn', auditlog:'Audit Log' , onboarding: 'Onboarding', kpi: 'KPI & Hiệu suất'};
 let _nsData=[], _uvData=[], _pvData=[];
 
-// ── NAVIGATION ──
+// ... (các hàm cũ giữ nguyên) ...
+
+// ── NAVIGATION (đã update) ──
 function showView(id) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById('view-'+id).classList.add('active');
+  const targetView = document.getElementById('view-'+id);
+  if (targetView) targetView.classList.add('active');
+
   document.querySelectorAll('.nav-item').forEach(n => {
-    if(n.getAttribute('onclick') && n.getAttribute('onclick').includes("'"+id+"'")) n.classList.add('active');
+    if (n.getAttribute('onclick') && n.getAttribute('onclick').includes("'"+id+"'")) {
+      n.classList.add('active');
+    }
   });
+
   document.getElementById('page-title').textContent = PAGE_TITLES[id] || id;
 
+  // Load data cho các tab mới
   if(id==='dashboard')  loadDashboard();
   if(id==='nhansu')     loadNhanSu();
   if(id==='ungvien')    loadUngVien();
   if(id==='phongvan')   loadPhongVan();
   if(id==='auditlog')   loadAuditLog();
+  if(id==='onboarding') initOnboarding && initOnboarding();   // GĐ4
+  if(id==='kpi')        initKpi && initKpi();                 // GĐ4
 }
 
 // ── MODALS ──
