@@ -1,0 +1,2492 @@
+// =============================================================================
+// HRIS GIAI ĐOẠN 5 — PAYROLL CƠ BẢN + LEAVE MANAGEMENT + REPORTS
+// Dán file này vào Apps Script Editor, BÊN DƯỚI các file GĐ 1, 2, 3, 4
+// Cập nhật: 2026 | Tác giả: HR Analyst System
+// =============================================================================
+// CẤU TRÚC FILE:
+// MODULE 30 — Payroll: Setup sheet, Tính lương, Payslip email, Xuất XLSX
+// MODULE 31 — Leave Management: Setup sheet, CRUD đơn nghỉ, Duyệt qua email, Trừ ngày
+// MODULE 32 — Attendance: Setup sheet, Nhập chấm công, Tính ngày công
+// MODULE 33 — Reports: Monthly HR report, Turnover report, AI insights
+// MODULE 34 — Export: Xuất XLSX/CSV danh sách nhân sự & bảng lương
+// MODULE 35 — handleRequest() mở rộng GĐ 5 (thay thế hoàn toàn GĐ 4)
+// MODULE 36 — UI HTML: Tab Payroll + Tab Nghỉ phép + Tab Báo cáo
+// MODULE 37 — Setup GĐ 5
+// =============================================================================
+
+// ── Thêm vào CONFIG.SHEETS trong GĐ 1: ──
+//   PAYROLL:         'PAYROLL',
+//   LEAVE_REQUESTS:  'LEAVE_REQUESTS',
+//   ATTENDANCE:      'ATTENDANCE',
+//   LEAVE_BALANCE:   'LEAVE_BALANCE',
+
+// ── Thêm vào CONFIG (sau NOTIFY): ──
+//   PAYROLL: {
+//     ANNUAL_LEAVE_DAYS: 12,     // Số ngày phép năm mặc định
+//     WORKING_DAYS_MONTH: 26,    // Ngày công chuẩn/tháng
+//     BHXH_EMPLOYEE_RATE: 0.08,  // NLĐ đóng BHXH 8%
+//     BHXH_EMPLOYER_RATE: 0.175, // NSDLĐ đóng 17.5%
+//     BHYT_EMPLOYEE_RATE: 0.015, // BHYT NLĐ 1.5%
+//     BHTN_EMPLOYEE_RATE: 0.01,  // BHTN NLĐ 1%
+//     PERSONAL_DEDUCTION: 11000000,  // Giảm trừ bản thân 11tr
+//     DEPENDENT_DEDUCTION: 4400000,  // Giảm trừ người phụ thuộc 4.4tr
+//   }
+
+// =============================================================================
+// MODULE 30 — PAYROLL
+// =============================================================================
+
+/**
+ * Setup sheet PAYROLL
+ */
+function setupPayrollSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = 'PAYROLL';
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = [
+      'ID_Payroll', 'ID_NhanSu', 'Ho_Ten', 'Bo_Phan', 'Period',
+      'Basic_Salary', 'Allowance', 'Bonus', 'Work_Days', 'Standard_Days',
+      'Gross_Salary', 'BHXH_Employee', 'BHYT_Employee', 'BHTN_Employee',
+      'Total_Insurance', 'Taxable_Income', 'Tax_PIT', 'Net_Salary',
+      'BHXH_Employer', 'Status', 'Note', 'Created_At', 'Created_By'
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setBackground('#085041')
+      .setFontColor('#FFFFFF')
+      .setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.setFrozenColumns(2);
+
+    const statusRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(['Draft', 'Approved', 'Paid'], true).build();
+    sheet.getRange('T2:T2000').setDataValidation(statusRule);
+
+    // Format số tiền
+    const moneyFormat = '#,##0';
+    [6,7,8,11,12,13,14,15,16,17,18,19].forEach(col => {
+      sheet.getRange(2, col, 2000, 1).setNumberFormat(moneyFormat);
+    });
+
+    const colWidths = [160,140,160,120,90,140,120,110,90,100,140,130,130,130,130,140,110,140,130,100,200,140,160];
+    colWidths.forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+    Logger.log('✅ Đã tạo sheet PAYROLL');
+  }
+  return sheet;
+}
+
+/**
+ * Setup sheet LEAVE_BALANCE — theo dõi số ngày phép còn lại mỗi nhân sự mỗi năm
+ */
+function setupLeaveBalanceSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = 'LEAVE_BALANCE';
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = [
+      'ID_NhanSu', 'Ho_Ten', 'Nam', 'Annual_Entitlement',
+      'Annual_Used', 'Annual_Remaining',
+      'Sick_Used', 'Unpaid_Used', 'Updated_At'
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setBackground('#3D35A8').setFontColor('#FFFFFF').setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    Logger.log('✅ Đã tạo sheet LEAVE_BALANCE');
+  }
+  return sheet;
+}
+
+/**
+ * Tính thuế TNCN theo biểu lũy tiến VN (7 bậc)
+ * @param {number} taxableIncome - Thu nhập chịu thuế (sau giảm trừ)
+ * @returns {number} Số tiền thuế
+ */
+function calcPIT(taxableIncome) {
+  if (taxableIncome <= 0) return 0;
+  const brackets = [
+    { limit: 5000000,  rate: 0.05 },
+    { limit: 10000000, rate: 0.10 },
+    { limit: 18000000, rate: 0.15 },
+    { limit: 32000000, rate: 0.20 },
+    { limit: 52000000, rate: 0.25 },
+    { limit: 80000000, rate: 0.30 },
+    { limit: Infinity,  rate: 0.35 },
+  ];
+  let tax = 0;
+  let prev = 0;
+  for (const b of brackets) {
+    if (taxableIncome <= prev) break;
+    const slice = Math.min(taxableIncome - prev, b.limit - prev);
+    tax += slice * b.rate;
+    prev = b.limit;
+  }
+  return Math.round(tax);
+}
+
+/**
+ * Tính toàn bộ bảng lương cho một nhân sự trong một kỳ
+ * @param {Object} input
+ *   - basic_salary: Lương cơ bản
+ *   - allowance: Phụ cấp (không tính BHXH)
+ *   - bonus: Thưởng (không tính BHXH)
+ *   - work_days: Ngày công thực tế
+ *   - standard_days: Ngày công chuẩn tháng (mặc định 26)
+ *   - dependents: Số người phụ thuộc (mặc định 0)
+ * @returns {Object} Kết quả tính lương đầy đủ
+ */
+function calcSalary(input) {
+  const BHXH_EE  = 0.08;
+  const BHYT_EE  = 0.015;
+  const BHTN_EE  = 0.01;
+  const BHXH_ER  = 0.175;
+  const PERSONAL_DEDUCTION   = 11000000;
+  const DEPENDENT_DEDUCTION  = 4400000;
+
+  const basic        = parseFloat(input.basic_salary) || 0;
+  const allowance    = parseFloat(input.allowance) || 0;
+  const bonus        = parseFloat(input.bonus) || 0;
+  const workDays     = parseFloat(input.work_days) || 26;
+  const standardDays = parseFloat(input.standard_days) || 26;
+  const dependents   = parseInt(input.dependents) || 0;
+
+  // Lương theo ngày công thực tế
+  const salaryRatio  = standardDays > 0 ? workDays / standardDays : 1;
+  const actualBasic  = Math.round(basic * salaryRatio);
+
+  // BHXH tính trên lương cơ bản (không gồm phụ cấp, bonus)
+  const bhxh_ee  = Math.round(basic * BHXH_EE  * salaryRatio);
+  const bhyt_ee  = Math.round(basic * BHYT_EE  * salaryRatio);
+  const bhtn_ee  = Math.round(basic * BHTN_EE  * salaryRatio);
+  const totalIns = bhxh_ee + bhyt_ee + bhtn_ee;
+
+  // Gross = lương thực tế + phụ cấp + bonus (tỉ lệ ngày công)
+  const gross = Math.round(actualBasic + allowance * salaryRatio + bonus * salaryRatio);
+
+  // Thu nhập chịu thuế = Gross - Bảo hiểm - Giảm trừ bản thân - Giảm trừ người phụ thuộc
+  const totalDeduction = PERSONAL_DEDUCTION + dependents * DEPENDENT_DEDUCTION;
+  const taxableIncome  = Math.max(0, gross - totalIns - totalDeduction);
+
+  const pit     = calcPIT(taxableIncome);
+  const net     = gross - totalIns - pit;
+  const bhxh_er = Math.round(basic * BHXH_ER * salaryRatio);
+
+  return {
+    basic_salary:    basic,
+    actual_basic:    actualBasic,
+    allowance:       Math.round(allowance * salaryRatio),
+    bonus:           Math.round(bonus * salaryRatio),
+    work_days:       workDays,
+    standard_days:   standardDays,
+    gross_salary:    gross,
+    bhxh_employee:   bhxh_ee,
+    bhyt_employee:   bhyt_ee,
+    bhtn_employee:   bhtn_ee,
+    total_insurance: totalIns,
+    taxable_income:  taxableIncome,
+    tax_pit:         pit,
+    net_salary:      net,
+    bhxh_employer:   bhxh_er,
+  };
+}
+
+/**
+ * Tạo bản ghi payroll cho một nhân sự
+ */
+function createPayroll(data, user) {
+  if (!data.id_nhan_su || !data.period || !data.basic_salary) {
+    return { success: false, error: 'Thiếu ID nhân sự, kỳ lương hoặc lương cơ bản' };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('PAYROLL') || setupPayrollSheet();
+
+  // Kiểm tra trùng lặp (cùng nhân sự + cùng kỳ)
+  const existing = sheet.getDataRange().getValues().slice(1);
+  const dup = existing.find(r => r[1] === data.id_nhan_su && r[4] === data.period);
+  if (dup) {
+    return { success: false, error: `Đã có bảng lương kỳ ${data.period} cho nhân sự này` };
+  }
+
+  const calc = calcSalary(data);
+  const id   = generateId('PR');
+
+  sheet.appendRow([
+    id, data.id_nhan_su, data.ho_ten || '', data.bo_phan || '', data.period,
+    calc.basic_salary, parseFloat(data.allowance) || 0, parseFloat(data.bonus) || 0,
+    calc.work_days, calc.standard_days,
+    calc.gross_salary, calc.bhxh_employee, calc.bhyt_employee, calc.bhtn_employee,
+    calc.total_insurance, calc.taxable_income, calc.tax_pit, calc.net_salary,
+    calc.bhxh_employer,
+    'Draft', data.note || '', new Date(), user.email
+  ]);
+
+  writeAuditLog('CREATE', 'PAYROLL', id, '', '', data.id_nhan_su,
+    `Tạo payroll ${data.period} — Net: ${formatVnd(calc.net_salary)}`);
+
+  return { success: true, id, calc };
+}
+
+/**
+ * Tạo bảng lương hàng loạt cho tất cả nhân sự đang active trong kỳ
+ */
+function runBatchPayroll(period, user) {
+  if (!period) return { success: false, error: 'Thiếu kỳ lương' };
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const nsSheet = ss.getSheetByName('NHAN_SU');
+  if (!nsSheet) return { success: false, error: 'Sheet NHAN_SU không tồn tại' };
+
+  const nsData = nsSheet.getDataRange().getValues().slice(1)
+    .filter(r => r[0] && r[8] !== 'Đã nghỉ');
+
+  // Lấy ngày công từ bảng chấm công nếu có
+  const attData = getAttendanceMap(period);
+
+  let created = 0;
+  let skipped = 0;
+  const errors = [];
+
+  nsData.forEach(row => {
+    const nsId   = row[0];
+    const hoTen  = row[1];
+    const boPhan = row[2];
+    // Lương cơ bản lấy từ cột 13 (Link_HoSo placeholder — cần thêm cột Luong_CB vào NHAN_SU)
+    // Fallback: dùng 0, HR nhập thủ công sau
+    const workDays = attData[nsId] || 26;
+
+    const res = createPayroll({
+      id_nhan_su: nsId, ho_ten: hoTen, bo_phan: boPhan,
+      period, basic_salary: row[12] || 0, // cột M = lương nếu đã thêm
+      allowance: 0, bonus: 0,
+      work_days: workDays, standard_days: 26, dependents: 0
+    }, user);
+
+    if (res.success) created++;
+    else if (res.error && res.error.includes('Đã có')) skipped++;
+    else errors.push(`${hoTen}: ${res.error}`);
+
+    Utilities.sleep(100); // Tránh vượt quota
+  });
+
+  return { success: true, created, skipped, errors };
+}
+
+/**
+ * Cập nhật trạng thái payroll (Draft → Approved → Paid)
+ */
+function updatePayrollStatus(data, user) {
+  if (!data.id || !data.status) return { success: false, error: 'Thiếu ID hoặc trạng thái' };
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('PAYROLL');
+  if (!sheet) return { success: false, error: 'Sheet PAYROLL không tồn tại' };
+
+  const allData = sheet.getDataRange().getValues();
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][0] === data.id) {
+      const oldStatus = allData[i][19];
+      sheet.getRange(i + 1, 20).setValue(data.status);
+
+      const colors = { Draft: '#FFFFFF', Approved: '#FAEEDA', Paid: '#E1F5EE' };
+      sheet.getRange(i + 1, 1, 1, allData[0].length)
+        .setBackground(colors[data.status] || '#FFFFFF');
+
+      writeAuditLog('UPDATE', 'PAYROLL', data.id, 'Status', oldStatus, data.status, '');
+      return { success: true, message: `Đã cập nhật trạng thái → ${data.status}` };
+    }
+  }
+  return { success: false, error: 'Không tìm thấy bản ghi payroll' };
+}
+
+/**
+ * Cập nhật một trường payroll (basic_salary, allowance, bonus, work_days)
+ * → Tự tính lại toàn bộ
+ */
+function updatePayrollRecord(data, user) {
+  if (!data.id) return { success: false, error: 'Thiếu ID payroll' };
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('PAYROLL');
+  if (!sheet) return { success: false, error: 'Sheet PAYROLL không tồn tại' };
+
+  const allData = sheet.getDataRange().getValues();
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][0] !== data.id) continue;
+
+    const row = allData[i];
+    const input = {
+      basic_salary:  data.basic_salary  !== undefined ? data.basic_salary  : row[5],
+      allowance:     data.allowance     !== undefined ? data.allowance     : row[6],
+      bonus:         data.bonus         !== undefined ? data.bonus         : row[7],
+      work_days:     data.work_days     !== undefined ? data.work_days     : row[8],
+      standard_days: data.standard_days !== undefined ? data.standard_days : row[9],
+      dependents:    data.dependents    !== undefined ? data.dependents    : 0,
+    };
+
+    const calc = calcSalary(input);
+    const updateRow = [
+      row[0], row[1], row[2], row[3], row[4],
+      calc.basic_salary, input.allowance, input.bonus, calc.work_days, calc.standard_days,
+      calc.gross_salary, calc.bhxh_employee, calc.bhyt_employee, calc.bhtn_employee,
+      calc.total_insurance, calc.taxable_income, calc.tax_pit, calc.net_salary,
+      calc.bhxh_employer,
+      row[19], data.note || row[20], row[21], user.email
+    ];
+
+    sheet.getRange(i + 1, 1, 1, updateRow.length).setValues([updateRow]);
+    writeAuditLog('UPDATE', 'PAYROLL', data.id, 'recalculated', '', '', user.email);
+    return { success: true, calc };
+  }
+  return { success: false, error: 'Không tìm thấy bản ghi payroll' };
+}
+
+/**
+ * Lấy danh sách payroll (lọc theo period / nsId / status)
+ */
+function getPayrollList(options) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('PAYROLL');
+  if (!sheet) return [];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  const headers = data[0].map(h => h.toString());
+  let rows = data.slice(1).filter(r => r[0] !== '').map(row => {
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = row[i] instanceof Date ? row[i].toISOString() : row[i]; });
+    return obj;
+  });
+
+  if (options) {
+    if (options.period) rows = rows.filter(r => r['Period'] === options.period);
+    if (options.nsId)   rows = rows.filter(r => r['ID_NhanSu'] === options.nsId);
+    if (options.status) rows = rows.filter(r => r['Status'] === options.status);
+  }
+  return rows;
+}
+
+/**
+ * Gửi payslip qua email cho nhân sự
+ */
+function sendPayslip(payrollId, user) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('PAYROLL');
+  if (!sheet) return { success: false, error: 'Sheet PAYROLL không tồn tại' };
+
+  const allData = sheet.getDataRange().getValues();
+  const headerRow = allData[0].map(h => h.toString());
+  const row = allData.slice(1).find(r => r[0] === payrollId);
+  if (!row) return { success: false, error: 'Không tìm thấy bản ghi payroll' };
+
+  // Lấy email nhân sự từ NHAN_SU
+  const nsSheet = ss.getSheetByName('NHAN_SU');
+  let nsEmail = '';
+  if (nsSheet) {
+    const nsData = nsSheet.getDataRange().getValues().slice(1);
+    const nsRow = nsData.find(r => r[0] === row[1]);
+    if (nsRow) nsEmail = nsRow[7];
+  }
+
+  if (!nsEmail) return { success: false, error: 'Không tìm thấy email nhân sự' };
+
+  const period  = row[4];
+  const hoTen   = row[2];
+  const subject = `💰 Phiếu lương tháng ${period} — ${hoTen}`;
+
+  const body = buildPayslipBody(row, headerRow);
+
+  try {
+    MailApp.sendEmail({
+      to: nsEmail,
+      subject,
+      htmlBody: body,
+    });
+    writeAuditLog('CREATE', 'PAYROLL', payrollId, 'SendPayslip', '', nsEmail,
+      `Gửi payslip ${period}`);
+    return { success: true, message: `Đã gửi payslip đến ${nsEmail}` };
+  } catch (e) {
+    return { success: false, error: 'Lỗi gửi email: ' + e.message };
+  }
+}
+
+/**
+ * Build HTML phiếu lương
+ */
+function buildPayslipBody(row, headers) {
+  const fmt = n => typeof n === 'number' ? n.toLocaleString('vi-VN') + ' đ' : (n || '—');
+  return `
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #ddd;border-radius:12px;overflow:hidden">
+  <div style="background:#085041;color:#fff;padding:24px 28px">
+    <h2 style="margin:0;font-size:22px">💰 Phiếu lương</h2>
+    <p style="margin:4px 0 0;opacity:.8">Kỳ thanh toán: ${row[4]}</p>
+  </div>
+  <div style="padding:24px 28px">
+    <table style="width:100%;border-collapse:collapse;margin-bottom:20px">
+      <tr><td style="color:#888;padding:6px 0;width:45%">Họ tên</td><td style="font-weight:600">${row[2]}</td></tr>
+      <tr><td style="color:#888;padding:6px 0">Bộ phận</td><td>${row[3]}</td></tr>
+      <tr><td style="color:#888;padding:6px 0">Ngày công</td><td>${row[8]}/${row[9]} ngày</td></tr>
+    </table>
+    <h4 style="color:#085041;border-bottom:2px solid #085041;padding-bottom:6px;margin-bottom:12px">Thu nhập</h4>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:20px">
+      <tr><td style="padding:6px 0;color:#555">Lương cơ bản</td><td style="text-align:right">${fmt(row[5])}</td></tr>
+      <tr><td style="padding:6px 0;color:#555">Phụ cấp</td><td style="text-align:right">${fmt(row[6])}</td></tr>
+      <tr><td style="padding:6px 0;color:#555">Thưởng</td><td style="text-align:right">${fmt(row[7])}</td></tr>
+      <tr style="background:#f9f9f9"><td style="padding:8px 6px;font-weight:700">Tổng Gross</td><td style="text-align:right;font-weight:700">${fmt(row[10])}</td></tr>
+    </table>
+    <h4 style="color:#C0392B;border-bottom:2px solid #C0392B;padding-bottom:6px;margin-bottom:12px">Các khoản khấu trừ</h4>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:20px">
+      <tr><td style="padding:6px 0;color:#555">BHXH (8%)</td><td style="text-align:right;color:#C0392B">- ${fmt(row[11])}</td></tr>
+      <tr><td style="padding:6px 0;color:#555">BHYT (1.5%)</td><td style="text-align:right;color:#C0392B">- ${fmt(row[12])}</td></tr>
+      <tr><td style="padding:6px 0;color:#555">BHTN (1%)</td><td style="text-align:right;color:#C0392B">- ${fmt(row[13])}</td></tr>
+      <tr><td style="padding:6px 0;color:#555">Thuế TNCN</td><td style="text-align:right;color:#C0392B">- ${fmt(row[16])}</td></tr>
+    </table>
+    <div style="background:#E1F5EE;border-radius:10px;padding:16px 20px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:18px;font-weight:700;color:#085041">Thực lãnh (Net)</span>
+      <span style="font-size:24px;font-weight:800;color:#085041">${fmt(row[17])}</span>
+    </div>
+    <p style="color:#aaa;font-size:12px;margin-top:20px;text-align:center">
+      Phiếu lương được tạo tự động bởi hệ thống HRIS. Vui lòng liên hệ HR nếu có thắc mắc.
+    </p>
+  </div>
+</div>`;
+}
+
+/**
+ * Xuất bảng lương ra CSV string (có thể dán vào Google Sheets)
+ */
+function exportPayrollCsv(period) {
+  const rows = getPayrollList({ period });
+  if (rows.length === 0) return { success: false, error: 'Không có dữ liệu' };
+
+  const headers = ['ID_NhanSu','Ho_Ten','Bo_Phan','Period','Basic_Salary',
+    'Allowance','Bonus','Work_Days','Gross_Salary','BHXH_Employee',
+    'BHYT_Employee','BHTN_Employee','Tax_PIT','Net_Salary','Status'];
+
+  const lines = [headers.join(',')];
+  rows.forEach(r => {
+    lines.push(headers.map(h => {
+      const v = r[h] !== undefined ? r[h] : '';
+      return typeof v === 'string' && v.includes(',') ? `"${v}"` : v;
+    }).join(','));
+  });
+
+  return { success: true, csv: lines.join('\n'), count: rows.length };
+}
+
+/**
+ * Helper map ngày công từ ATTENDANCE theo nsId
+ */
+function getAttendanceMap(period) {
+  const map = {};
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('ATTENDANCE');
+    if (!sheet) return map;
+    const data = sheet.getDataRange().getValues().slice(1);
+    data.forEach(row => {
+      if (row[3] === period) map[row[0]] = parseFloat(row[4]) || 26;
+    });
+  } catch (e) {}
+  return map;
+}
+
+/**
+ * Format số tiền VND
+ */
+function formatVnd(n) {
+  return (parseFloat(n) || 0).toLocaleString('vi-VN') + ' đ';
+}
+
+// =============================================================================
+// MODULE 31 — LEAVE MANAGEMENT
+// =============================================================================
+
+/**
+ * Setup sheet LEAVE_REQUESTS
+ */
+function setupLeaveRequestsSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = 'LEAVE_REQUESTS';
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = [
+      'ID_Leave', 'ID_NhanSu', 'Ho_Ten', 'Bo_Phan',
+      'Leave_Type', 'From_Date', 'To_Date', 'Days',
+      'Reason', 'Approver', 'Status',
+      'Approved_At', 'Reject_Reason', 'Created_At', 'Created_By'
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setBackground('#0C447C').setFontColor('#FFFFFF').setFontWeight('bold');
+    sheet.setFrozenRows(1);
+
+    const typeRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(['Nghỉ phép năm','Nghỉ bệnh','Nghỉ không lương','Nghỉ thai sản','Nghỉ hôn sự','Nghỉ đám tang'], true).build();
+    sheet.getRange('E2:E2000').setDataValidation(typeRule);
+
+    const statusRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(['Pending','Approved','Rejected','Cancelled'], true).build();
+    sheet.getRange('K2:K2000').setDataValidation(statusRule);
+
+    sheet.getRange('F2:G2000').setNumberFormat('dd/MM/yyyy');
+
+    const colWidths = [160,140,160,120,130,110,110,70,220,180,90,140,180,140,160];
+    colWidths.forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+    Logger.log('✅ Đã tạo sheet LEAVE_REQUESTS');
+  }
+  return sheet;
+}
+
+/**
+ * Setup sheet ATTENDANCE
+ */
+function setupAttendanceSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = 'ATTENDANCE';
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = [
+      'ID_NhanSu','Ho_Ten','Bo_Phan','Period',
+      'Work_Days','Leave_Days','Late_Count','OT_Hours','Note',
+      'Created_At','Created_By'
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setBackground('#2C2C2A').setFontColor('#FFFFFF').setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    Logger.log('✅ Đã tạo sheet ATTENDANCE');
+  }
+  return sheet;
+}
+
+/**
+ * Tạo đơn xin nghỉ phép
+ */
+function createLeaveRequest(data, user) {
+  if (!data.id_nhan_su || !data.leave_type || !data.from_date || !data.to_date) {
+    return { success: false, error: 'Thiếu thông tin bắt buộc (nhân sự, loại nghỉ, ngày)' };
+  }
+
+  const fromDate = new Date(data.from_date);
+  const toDate   = new Date(data.to_date);
+  if (toDate < fromDate) {
+    return { success: false, error: 'Ngày kết thúc phải sau ngày bắt đầu' };
+  }
+
+  // Tính số ngày (không tính thứ 7, CN)
+  const days = countWorkDays(fromDate, toDate);
+  if (days <= 0) return { success: false, error: 'Khoảng thời gian nghỉ không hợp lệ' };
+
+  // Kiểm tra số ngày phép còn lại nếu là nghỉ phép năm
+  if (data.leave_type === 'Nghỉ phép năm') {
+    const balance = getLeaveBalance(data.id_nhan_su, new Date().getFullYear());
+    if (balance !== null && balance < days) {
+      return { success: false, error: `Không đủ ngày phép. Còn lại: ${balance} ngày, yêu cầu: ${days} ngày` };
+    }
+  }
+
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('LEAVE_REQUESTS') || setupLeaveRequestsSheet();
+  const id    = generateId('LV');
+
+  const approverEmail = data.approver || CONFIG.NOTIFY.EMAIL_ALERT;
+
+  sheet.appendRow([
+    id, data.id_nhan_su, data.ho_ten || '', data.bo_phan || '',
+    data.leave_type, fromDate, toDate, days,
+    data.reason || '', approverEmail,
+    'Pending', '', '', new Date(), user.email
+  ]);
+
+  // Gửi email thông báo đến người duyệt
+  sendLeaveApprovalRequest(id, data, days, approverEmail, user);
+
+  writeAuditLog('CREATE', 'LEAVE_REQUESTS', id, '', '', data.id_nhan_su,
+    `Xin nghỉ ${data.leave_type}: ${days} ngày`);
+
+  return { success: true, id, days };
+}
+
+/**
+ * Phê duyệt / Từ chối đơn nghỉ phép
+ */
+function processLeaveRequest(data, user) {
+  if (!data.id || !data.action) return { success: false, error: 'Thiếu ID hoặc action' };
+  if (!['Approved','Rejected','Cancelled'].includes(data.action)) {
+    return { success: false, error: 'Action không hợp lệ' };
+  }
+
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('LEAVE_REQUESTS');
+  if (!sheet) return { success: false, error: 'Sheet LEAVE_REQUESTS không tồn tại' };
+
+  const allData = sheet.getDataRange().getValues();
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][0] !== data.id) continue;
+
+    const oldStatus  = allData[i][10];
+    const nsId       = allData[i][1];
+    const leaveType  = allData[i][4];
+    const days       = parseFloat(allData[i][7]);
+    const year       = new Date(allData[i][5]).getFullYear();
+
+    if (oldStatus !== 'Pending') {
+      return { success: false, error: `Đơn đã ở trạng thái ${oldStatus}, không thể thay đổi` };
+    }
+
+    sheet.getRange(i + 1, 11).setValue(data.action);
+    sheet.getRange(i + 1, 12).setValue(new Date());
+    if (data.reject_reason) sheet.getRange(i + 1, 13).setValue(data.reject_reason);
+
+    const colors = { Approved: '#E1F5EE', Rejected: '#FCEBEB', Cancelled: '#F4F4F2' };
+    sheet.getRange(i + 1, 1, 1, allData[0].length)
+      .setBackground(colors[data.action] || '#FFFFFF');
+
+    // Trừ ngày phép nếu Approved
+    if (data.action === 'Approved' && leaveType === 'Nghỉ phép năm') {
+      deductLeaveBalance(nsId, allData[i][2], days, year, user.email);
+    }
+
+    // Gửi email kết quả cho nhân sự
+    sendLeaveResultNotification(allData[i], data.action, data.reject_reason);
+
+    writeAuditLog('UPDATE', 'LEAVE_REQUESTS', data.id, 'Status',
+      oldStatus, data.action, user.email);
+    return { success: true, message: `Đã ${data.action === 'Approved' ? 'duyệt' : 'từ chối'} đơn nghỉ phép` };
+  }
+  return { success: false, error: 'Không tìm thấy đơn nghỉ' };
+}
+
+/**
+ * Lấy danh sách đơn nghỉ phép
+ */
+function getLeaveList(options) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('LEAVE_REQUESTS');
+  if (!sheet) return [];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  const headers = data[0].map(h => h.toString());
+  let rows = data.slice(1).filter(r => r[0] !== '').map(row => {
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = row[i] instanceof Date ? row[i].toISOString() : row[i]; });
+    return obj;
+  });
+
+  if (options) {
+    if (options.nsId)   rows = rows.filter(r => r['ID_NhanSu'] === options.nsId);
+    if (options.status) rows = rows.filter(r => r['Status'] === options.status);
+    if (options.month) {
+      rows = rows.filter(r => {
+        const d = new Date(r['From_Date']);
+        return d.getMonth() === options.month - 1;
+      });
+    }
+  }
+  return rows.sort((a, b) => new Date(b['Created_At']) - new Date(a['Created_At']));
+}
+
+/**
+ * Tính số ngày làm việc giữa 2 ngày (bỏ qua T7, CN)
+ */
+function countWorkDays(fromDate, toDate) {
+  let count = 0;
+  const d = new Date(fromDate);
+  while (d <= toDate) {
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) count++;
+    d.setDate(d.getDate() + 1);
+  }
+  return count;
+}
+
+/**
+ * Lấy số ngày phép còn lại của nhân sự
+ */
+function getLeaveBalance(nsId, year) {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('LEAVE_BALANCE');
+    if (!sheet) return null;
+
+    const data = sheet.getDataRange().getValues().slice(1);
+    const row  = data.find(r => r[0] === nsId && r[2] === year);
+    return row ? parseFloat(row[5]) : 12; // Mặc định 12 ngày/năm nếu chưa có record
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Trừ ngày phép khi đơn được duyệt
+ */
+function deductLeaveBalance(nsId, hoTen, days, year, byEmail) {
+  try {
+    const ss    = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('LEAVE_BALANCE') || setupLeaveBalanceSheet();
+    const data  = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === nsId && data[i][2] === year) {
+        const used      = parseFloat(data[i][4]) || 0;
+        const entitle   = parseFloat(data[i][3]) || 12;
+        const newUsed   = used + days;
+        const remaining = Math.max(0, entitle - newUsed);
+        sheet.getRange(i + 1, 5).setValue(newUsed);
+        sheet.getRange(i + 1, 6).setValue(remaining);
+        sheet.getRange(i + 1, 9).setValue(new Date());
+        return;
+      }
+    }
+    // Chưa có record → tạo mới
+    sheet.appendRow([
+      nsId, hoTen, year, 12,
+      days, Math.max(0, 12 - days), 0, 0, new Date()
+    ]);
+  } catch (e) {
+    Logger.log('deductLeaveBalance error: ' + e.message);
+  }
+}
+
+/**
+ * Gửi email yêu cầu duyệt nghỉ phép đến approver
+ */
+function sendLeaveApprovalRequest(leaveId, data, days, approverEmail, user) {
+  try {
+    const subject = `📋 [HR] Yêu cầu duyệt nghỉ phép — ${data.ho_ten || 'Nhân viên'}`;
+    const body = `Có một đơn xin nghỉ phép cần duyệt:\n\n` +
+      `• Nhân sự: ${data.ho_ten || ''} (${data.id_nhan_su})\n` +
+      `• Loại: ${data.leave_type}\n` +
+      `• Từ ngày: ${data.from_date}\n` +
+      `• Đến ngày: ${data.to_date}\n` +
+      `• Số ngày: ${days} ngày làm việc\n` +
+      `• Lý do: ${data.reason || '(không có)'}\n\n` +
+      `ID đơn: ${leaveId}\n\n` +
+      `Vui lòng vào hệ thống HRIS để duyệt hoặc từ chối.`;
+    MailApp.sendEmail(approverEmail, subject, body);
+  } catch (e) {
+    Logger.log('sendLeaveApprovalRequest error: ' + e.message);
+  }
+}
+
+/**
+ * Gửi email kết quả xử lý đơn nghỉ phép cho nhân sự
+ */
+function sendLeaveResultNotification(leaveRow, action, rejectReason) {
+  try {
+    const ss      = SpreadsheetApp.getActiveSpreadsheet();
+    const nsSheet = ss.getSheetByName('NHAN_SU');
+    if (!nsSheet) return;
+
+    const nsData = nsSheet.getDataRange().getValues().slice(1);
+    const nsRow  = nsData.find(r => r[0] === leaveRow[1]);
+    if (!nsRow || !nsRow[7]) return;
+
+    const hoTen    = leaveRow[2];
+    const fromDate = leaveRow[5] instanceof Date
+      ? leaveRow[5].toLocaleDateString('vi-VN') : leaveRow[5];
+    const toDate   = leaveRow[6] instanceof Date
+      ? leaveRow[6].toLocaleDateString('vi-VN') : leaveRow[6];
+
+    const isApproved = action === 'Approved';
+    const subject = isApproved
+      ? `✅ Đơn nghỉ phép của bạn đã được duyệt`
+      : `❌ Đơn nghỉ phép của bạn đã bị từ chối`;
+
+    const body = `Xin chào ${hoTen},\n\n` +
+      (isApproved
+        ? `Đơn xin nghỉ phép của bạn từ ${fromDate} đến ${toDate} đã được phê duyệt.\n\nChúc bạn kỳ nghỉ vui vẻ! 🌴`
+        : `Đơn xin nghỉ phép của bạn từ ${fromDate} đến ${toDate} đã bị từ chối.\n` +
+          (rejectReason ? `\nLý do: ${rejectReason}\n` : '') +
+          `\nVui lòng liên hệ HR để biết thêm thông tin.`) +
+      `\n\nTrân trọng,\nPhòng Nhân sự`;
+
+    MailApp.sendEmail(nsRow[7], subject, body);
+  } catch (e) {
+    Logger.log('sendLeaveResultNotification error: ' + e.message);
+  }
+}
+
+// =============================================================================
+// MODULE 32 — ATTENDANCE (Chấm công)
+// =============================================================================
+
+/**
+ * Nhập / cập nhật chấm công tháng cho nhân sự
+ */
+function upsertAttendance(data, user) {
+  if (!data.id_nhan_su || !data.period) {
+    return { success: false, error: 'Thiếu ID nhân sự hoặc kỳ' };
+  }
+
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('ATTENDANCE') || setupAttendanceSheet();
+  const allData = sheet.getDataRange().getValues();
+
+  // Tìm bản ghi hiện có
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][0] === data.id_nhan_su && allData[i][3] === data.period) {
+      sheet.getRange(i + 1, 5).setValue(data.work_days   !== undefined ? data.work_days   : allData[i][4]);
+      sheet.getRange(i + 1, 6).setValue(data.leave_days  !== undefined ? data.leave_days  : allData[i][5]);
+      sheet.getRange(i + 1, 7).setValue(data.late_count  !== undefined ? data.late_count  : allData[i][6]);
+      sheet.getRange(i + 1, 8).setValue(data.ot_hours    !== undefined ? data.ot_hours    : allData[i][7]);
+      if (data.note) sheet.getRange(i + 1, 9).setValue(data.note);
+      writeAuditLog('UPDATE', 'ATTENDANCE', data.id_nhan_su, 'Period', data.period, data.work_days, '');
+      return { success: true, updated: true };
+    }
+  }
+
+  // Chưa có → tạo mới
+  sheet.appendRow([
+    data.id_nhan_su, data.ho_ten || '', data.bo_phan || '', data.period,
+    data.work_days   !== undefined ? data.work_days   : 26,
+    data.leave_days  !== undefined ? data.leave_days  : 0,
+    data.late_count  !== undefined ? data.late_count  : 0,
+    data.ot_hours    !== undefined ? data.ot_hours    : 0,
+    data.note || '', new Date(), user.email
+  ]);
+
+  return { success: true, created: true };
+}
+
+/**
+ * Lấy dữ liệu chấm công (lọc theo period)
+ */
+function getAttendanceList(options) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('ATTENDANCE');
+  if (!sheet) return [];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  const headers = data[0].map(h => h.toString());
+  let rows = data.slice(1).filter(r => r[0] !== '').map(row => {
+    const obj = {};
+    headers.forEach((h, i) => { obj[h] = row[i] instanceof Date ? row[i].toISOString() : row[i]; });
+    return obj;
+  });
+
+  if (options && options.period) rows = rows.filter(r => r['Period'] === options.period);
+  return rows;
+}
+
+// =============================================================================
+// MODULE 33 — REPORTS
+// =============================================================================
+
+/**
+ * Báo cáo HR tháng — tổng hợp headcount, tuyển dụng, nghỉ việc, chi phí lương
+ */
+function buildMonthlyHrReport(period) {
+  const p = period || getCurrentPeriod();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const report = { period: p, generated_at: new Date().toISOString() };
+
+  // ── Headcount ──
+  try {
+    const nsData = ss.getSheetByName('NHAN_SU')?.getDataRange().getValues().slice(1) || [];
+    const active  = nsData.filter(r => r[0] && r[8] !== 'Đã nghỉ');
+    const left    = nsData.filter(r => r[8] === 'Đã nghỉ');
+
+    report.headcount = {
+      total_active: active.length,
+      chinh_thuc:   active.filter(r => r[8] === 'Chính thức').length,
+      thu_viec:     active.filter(r => r[8] === 'Thử việc').length,
+      thuc_tap:     active.filter(r => r[8] === 'Thực tập').length,
+      da_nghi:      left.length,
+    };
+
+    // By department
+    const byDept = {};
+    active.forEach(r => {
+      const d = r[2] || 'Chưa phân bộ phận';
+      byDept[d] = (byDept[d] || 0) + 1;
+    });
+    report.headcount.by_department = byDept;
+  } catch (e) {}
+
+  // ── Tuyển dụng trong kỳ ──
+  try {
+    const uvData = ss.getSheetByName('UNG_VIEN')?.getDataRange().getValues().slice(1) || [];
+    report.recruitment = {
+      total_cv:       uvData.filter(r => r[0]).length,
+      dang_xet:       uvData.filter(r => r[5] === 'Đang xét').length,
+      da_offer:       uvData.filter(r => r[5] === 'Chính thức').length,
+      tu_choi:        uvData.filter(r => r[5] === 'Từ chối').length,
+    };
+  } catch (e) {}
+
+  // ── Nghỉ phép ──
+  try {
+    const lvData = getLeaveList({ status: 'Approved' });
+    report.leave = {
+      total_requests: lvData.length,
+      total_days:     lvData.reduce((s, r) => s + (parseFloat(r['Days']) || 0), 0),
+      by_type: lvData.reduce((acc, r) => {
+        const t = r['Leave_Type'] || 'Khác';
+        acc[t] = (acc[t] || 0) + (parseFloat(r['Days']) || 0);
+        return acc;
+      }, {}),
+    };
+  } catch (e) {}
+
+  // ── Chi phí lương ──
+  try {
+    const payData = getPayrollList({ period: p });
+    const totalGross = payData.reduce((s, r) => s + (parseFloat(r['Gross_Salary']) || 0), 0);
+    const totalNet   = payData.reduce((s, r) => s + (parseFloat(r['Net_Salary']) || 0), 0);
+    const totalEr    = payData.reduce((s, r) => s + (parseFloat(r['BHXH_Employer']) || 0), 0);
+    report.payroll = {
+      record_count:    payData.length,
+      total_gross:     totalGross,
+      total_net:       totalNet,
+      total_er_cost:   totalEr,
+      total_cost:      totalGross + totalEr,
+      avg_net:         payData.length > 0 ? Math.round(totalNet / payData.length) : 0,
+    };
+  } catch (e) {}
+
+  // ── KPI tổng quan ──
+  try {
+    const kpiData = getKpiList({ period: p });
+    const scored  = kpiData.filter(k => k['Score_Pct'] !== '' && k['Score_Pct'] !== null);
+    report.kpi = {
+      total_kpis:  kpiData.length,
+      scored_kpis: scored.length,
+      avg_score:   scored.length > 0
+        ? Math.round(scored.reduce((s, k) => s + parseFloat(k['Score_Pct'] || 0), 0) / scored.length)
+        : 0,
+      above_100:   scored.filter(k => parseFloat(k['Score_Pct']) >= 100).length,
+      below_80:    scored.filter(k => parseFloat(k['Score_Pct']) < 80).length,
+    };
+  } catch (e) {}
+
+  return report;
+}
+
+/**
+ * Báo cáo turnover — tỷ lệ nghỉ việc theo bộ phận
+ */
+function buildTurnoverReport(year) {
+  const y = year || new Date().getFullYear();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const report = { year: y, generated_at: new Date().toISOString() };
+
+  try {
+    const auditData = ss.getSheetByName('AUDIT_LOG')
+      ?.getDataRange().getValues().slice(1) || [];
+
+    // Lọc các lần xóa mềm (đổi Trang_Thai → Đã nghỉ) trong năm y
+    const leftEvents = auditData.filter(r =>
+      r[3] === 'UPDATE' &&
+      r[7] !== 'Đã nghỉ' &&
+      r[8] === 'Đã nghỉ' &&
+      r[0] instanceof Date &&
+      r[0].getFullYear() === y
+    );
+
+    const nsData = ss.getSheetByName('NHAN_SU')
+      ?.getDataRange().getValues().slice(1).filter(r => r[0]) || [];
+
+    const activeCount  = nsData.filter(r => r[8] !== 'Đã nghỉ').length;
+    const totalCount   = nsData.length;
+    const turnoverRate = totalCount > 0
+      ? ((leftEvents.length / totalCount) * 100).toFixed(1)
+      : 0;
+
+    // Turnover by department (dùng audit log ID để join về NHAN_SU)
+    const nsMap = {};
+    nsData.forEach(r => { nsMap[r[0]] = r[2] || 'Chưa rõ'; });
+
+    const byDept = {};
+    leftEvents.forEach(e => {
+      const dept = nsMap[e[5]] || 'Chưa rõ';
+      byDept[dept] = (byDept[dept] || 0) + 1;
+    });
+
+    // Monthly trend
+    const byMonth = {};
+    leftEvents.forEach(e => {
+      if (!(e[0] instanceof Date)) return;
+      const m = `T${e[0].getMonth() + 1}`;
+      byMonth[m] = (byMonth[m] || 0) + 1;
+    });
+
+    report.summary = {
+      total_employees:  totalCount,
+      active_employees: activeCount,
+      resigned_count:   leftEvents.length,
+      turnover_rate_pct: parseFloat(turnoverRate),
+    };
+    report.by_department = byDept;
+    report.monthly_trend = byMonth;
+  } catch (e) {
+    Logger.log('buildTurnoverReport error: ' + e.message);
+  }
+
+  return report;
+}
+
+/**
+ * AI phân tích insights từ monthly report
+ */
+function aiPayrollInsights(period) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
+  if (!apiKey) return { success: false, error: 'Chưa cài API Key' };
+
+  const report = buildMonthlyHrReport(period);
+
+  const prompt = `Bạn là HR analyst chuyên nghiệp.
+Phân tích dữ liệu HR tháng dưới đây và đưa ra 3–5 nhận xét ngắn gọn, actionable bằng tiếng Việt.
+
+Dữ liệu:
+${JSON.stringify(report, null, 2)}
+
+Trả về JSON hợp lệ (không có text ngoài JSON):
+{
+  "insights": [
+    { "icon": "emoji", "title": "Tiêu đề ngắn", "detail": "Mô tả chi tiết và gợi ý hành động" }
+  ],
+  "overall_health": "good | warning | critical",
+  "summary": "1-2 câu tóm tắt tổng thể"
+}`;
+
+  try {
+    const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      payload: JSON.stringify({
+        model: 'claude-opus-4-5',
+        max_tokens: 1200,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      muteHttpExceptions: true
+    });
+
+    const result = JSON.parse(response.getContentText());
+    if (result.error) throw new Error(result.error.message);
+
+    const raw    = result.content[0].text.trim();
+    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+    return { success: true, data: parsed };
+  } catch (e) {
+    return { success: false, error: 'AI lỗi: ' + e.message };
+  }
+}
+
+// =============================================================================
+// MODULE 35 — handleRequest() MỞ RỘNG GĐ 5
+// Thay thế hoàn toàn handleRequest() của GĐ 4
+// =============================================================================
+
+function handleRequest(request) {
+  const user = getCurrentUser();
+  if (!user.email || !user.role) {
+    return { success: false, error: 'Không có quyền truy cập.' };
+  }
+
+  const { action, payload } = request;
+
+  try {
+    switch (action) {
+
+      // ═══════════════ GĐ 1 ═══════════════
+      case 'GET_NHAN_SU_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getNhanSuList(user) };
+      case 'CREATE_NHAN_SU':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createNhanSu(payload, user);
+      case 'UPDATE_NHAN_SU':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateNhanSu(payload, user);
+      case 'DELETE_NHAN_SU':
+        if (!hasPermission(user.role, 'DELETE')) throw new Error('Không có quyền');
+        return deleteNhanSu(payload.id, user);
+      case 'GET_DASHBOARD_STATS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getDashboardStats(user) };
+      case 'GET_AUDIT_LOG':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return { success: true, data: getAuditLog(payload) };
+
+      // ═══════════════ GĐ 2 ═══════════════
+      case 'GET_UNG_VIEN_LIST':
+        return { success: true, data: getUngVienList(user) };
+      case 'CREATE_UNG_VIEN':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createUngVien(payload, user);
+      case 'UPDATE_UNG_VIEN_STATUS':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateUngVienStatus(payload, user);
+      case 'GET_PHONG_VAN_LIST':
+        return { success: true, data: getPhongVanList(user) };
+      case 'CREATE_PHONG_VAN':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createPhongVan(payload, user);
+      case 'GET_CHART_DATA':
+        return { success: true, data: getChartData(user) };
+      case 'GET_SINH_NHAT':
+        return { success: true, data: getSinhNhatTuanNay() };
+
+      // ═══════════════ GĐ 3 ═══════════════
+      case 'AI_CHAT':            return aiChat(payload);
+      case 'AI_ANALYZE_CV':      return aiAnalyzeCV(payload);
+      case 'AI_SUMMARIZE_INTERVIEW': return aiSummarizeInterview(payload);
+      case 'AI_ANALYZE_TURNOVER': return aiAnalyzeTurnoverRisk();
+      case 'AI_GENERATE_JD':     return aiGenerateJD(payload);
+
+      // ═══════════════ GĐ 4 — Onboarding ═══════════════
+      case 'GET_ONBOARDING_TASKS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getOnboardingTasks(payload) };
+      case 'CREATE_ONBOARDING_CHECKLIST':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createOnboardingChecklist(payload.nsId, payload.hoTen, user.email);
+      case 'UPDATE_ONBOARDING_TASK':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateOnboardingTask(payload, user);
+      case 'ADD_ONBOARDING_TASK':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return addOnboardingTask(payload, user);
+      case 'GET_ONBOARDING_PROGRESS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getOnboardingProgress(payload.nsId) };
+
+      // ═══════════════ GĐ 4 — KPI ═══════════════
+      case 'GET_KPI_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getKpiList(payload) };
+      case 'CREATE_KPI':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createKpi(payload, user);
+      case 'UPDATE_KPI_ACTUAL':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateKpiActual(payload, user);
+      case 'GET_KPI_WEIGHTED_SCORE':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: calcWeightedScore(payload.nsId, payload.period) };
+      case 'GET_KPI_SUMMARY_ALL':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getKpiSummaryAll(payload && payload.period) };
+      case 'CREATE_PERFORMANCE_REVIEW':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createPerformanceReview(payload, user);
+      case 'AI_SUGGEST_KPI':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return aiSuggestKpi(payload);
+
+      // ═══════════════ GĐ 5 — Payroll ═══════════════
+      case 'GET_PAYROLL_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getPayrollList(payload) };
+      case 'CREATE_PAYROLL':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createPayroll(payload, user);
+      case 'UPDATE_PAYROLL':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updatePayrollRecord(payload, user);
+      case 'UPDATE_PAYROLL_STATUS':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updatePayrollStatus(payload, user);
+      case 'RUN_BATCH_PAYROLL':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return runBatchPayroll(payload.period, user);
+      case 'SEND_PAYSLIP':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return sendPayslip(payload.id, user);
+      case 'EXPORT_PAYROLL_CSV':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return exportPayrollCsv(payload.period);
+      case 'CALC_SALARY_PREVIEW':
+        return { success: true, data: calcSalary(payload) };
+
+      // ═══════════════ GĐ 5 — Leave ═══════════════
+      case 'GET_LEAVE_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getLeaveList(payload) };
+      case 'CREATE_LEAVE_REQUEST':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createLeaveRequest(payload, user);
+      case 'PROCESS_LEAVE_REQUEST':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return processLeaveRequest(payload, user);
+      case 'GET_LEAVE_BALANCE':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getLeaveBalance(payload.nsId, payload.year || new Date().getFullYear()) };
+
+      // ═══════════════ GĐ 5 — Attendance ═══════════════
+      case 'GET_ATTENDANCE_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getAttendanceList(payload) };
+      case 'UPSERT_ATTENDANCE':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return upsertAttendance(payload, user);
+
+      // ═══════════════ GĐ 5 — Reports ═══════════════
+      case 'GET_MONTHLY_REPORT':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: buildMonthlyHrReport(payload && payload.period) };
+      case 'GET_TURNOVER_REPORT':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: buildTurnoverReport(payload && payload.year) };
+      case 'AI_PAYROLL_INSIGHTS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return aiPayrollInsights(payload && payload.period);
+
+      default:
+        return { success: false, error: 'Action không hợp lệ: ' + action };
+    }
+  } catch (e) {
+    writeAuditLog('ERROR', 'SYSTEM', '', action, '', '', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+// =============================================================================
+// MODULE 36 — UI: Tab Payroll
+// =============================================================================
+
+function getPayrollTabHtml() {
+  return `
+<div id="view-payroll">
+  <div class="topbar">
+    <div>
+      <h2 class="page-title">💰 Bảng lương</h2>
+      <p style="color:var(--text-3);font-size:13px;margin:0">Quản lý lương, bảo hiểm và thuế TNCN</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <select id="pr-period-filter" class="form-control" style="width:120px" onchange="loadPayrollTable()">
+        <option value="01/2026">T01/2026</option><option value="02/2026">T02/2026</option>
+        <option value="03/2026">T03/2026</option><option value="04/2026">T04/2026</option>
+        <option value="05/2026" selected>T05/2026</option><option value="06/2026">T06/2026</option>
+        <option value="07/2026">T07/2026</option><option value="08/2026">T08/2026</option>
+        <option value="09/2026">T09/2026</option><option value="10/2026">T10/2026</option>
+        <option value="11/2026">T11/2026</option><option value="12/2026">T12/2026</option>
+      </select>
+      <button class="btn btn-ghost" onclick="openCalcModal()">🧮 Tính thử lương</button>
+      <button class="btn btn-primary" onclick="openCreatePayrollModal()">+ Tạo phiếu lương</button>
+      <button class="btn btn-ghost" onclick="exportCsv()" title="Xuất CSV">⬇️ CSV</button>
+    </div>
+  </div>
+
+  <!-- Summary Cards -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px">
+    <div class="metric-card" style="border-top:3px solid #085041">
+      <div class="metric-label">Tổng Gross</div>
+      <div class="metric-value" id="pr-total-gross" style="color:#085041;font-size:18px">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #1D9E75">
+      <div class="metric-label">Tổng Net (thực lãnh)</div>
+      <div class="metric-value" id="pr-total-net" style="color:#1D9E75;font-size:18px">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #3D35A8">
+      <div class="metric-label">Tổng chi phí sử dụng LĐ</div>
+      <div class="metric-value" id="pr-total-cost" style="color:#3D35A8;font-size:18px">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #BA7517">
+      <div class="metric-label">Số phiếu / Đã duyệt</div>
+      <div class="metric-value" id="pr-count" style="color:#BA7517">—</div>
+    </div>
+  </div>
+
+  <!-- Bảng lương -->
+  <div class="panel">
+    <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Danh sách phiếu lương</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="pr-status-filter" class="form-control" style="width:130px" onchange="loadPayrollTable()">
+          <option value="">Tất cả trạng thái</option>
+          <option value="Draft">Draft</option>
+          <option value="Approved">Approved</option>
+          <option value="Paid">Paid</option>
+        </select>
+        <input id="pr-search" class="form-control" placeholder="🔍 Tìm nhân sự..."
+               style="width:180px" oninput="filterPayrollTable()">
+      </div>
+    </div>
+    <div class="panel-body" style="padding:0;overflow-x:auto">
+      <table class="data-table" id="pr-table">
+        <thead>
+          <tr>
+            <th>Nhân sự</th><th>Bộ phận</th><th style="text-align:right">Lương CB</th>
+            <th style="text-align:right">Gross</th><th style="text-align:right">Bảo hiểm</th>
+            <th style="text-align:right">Thuế TNCN</th><th style="text-align:right">Net</th>
+            <th style="text-align:center">Ngày công</th><th style="text-align:center">Trạng thái</th>
+            <th>Thao tác</th>
+          </tr>
+        </thead>
+        <tbody id="pr-tbody">
+          <tr><td colspan="10" style="text-align:center;color:var(--text-3);padding:40px">
+            Chọn kỳ để tải dữ liệu</td></tr>
+        </tbody>
+        <tfoot id="pr-tfoot"></tfoot>
+      </table>
+    </div>
+  </div>
+
+  <!-- Modal Tạo phiếu lương -->
+  <div id="modal-create-payroll" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:560px">
+      <div class="modal-header">
+        <h3>+ Tạo phiếu lương</h3>
+        <button class="btn-close" onclick="closeModal('modal-create-payroll')">×</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Nhân sự *</label>
+            <select id="cp-ns" class="form-control" onchange="prefillNsPayroll()"></select>
+          </div>
+          <div class="form-group">
+            <label>Kỳ lương *</label>
+            <input id="cp-period" class="form-control" placeholder="05/2026">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Lương cơ bản (đ) *</label>
+            <input id="cp-basic" type="number" class="form-control" placeholder="15000000">
+          </div>
+          <div class="form-group">
+            <label>Phụ cấp (đ)</label>
+            <input id="cp-allowance" type="number" class="form-control" placeholder="0" value="0">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Thưởng (đ)</label>
+            <input id="cp-bonus" type="number" class="form-control" placeholder="0" value="0">
+          </div>
+          <div class="form-group">
+            <label>Ngày công thực tế</label>
+            <input id="cp-workdays" type="number" class="form-control" value="26" min="0" max="31">
+          </div>
+          <div class="form-group">
+            <label>Người phụ thuộc</label>
+            <input id="cp-dependents" type="number" class="form-control" value="0" min="0">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Ghi chú</label>
+          <input id="cp-note" class="form-control" placeholder="Ghi chú tùy chọn">
+        </div>
+        <!-- Preview kết quả tính -->
+        <div id="cp-preview" style="display:none;background:#F4F4F2;border-radius:10px;padding:14px">
+          <div style="font-weight:600;margin-bottom:10px;color:var(--text-1)">📊 Kết quả tính lương</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px" id="cp-preview-grid"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="previewSalaryCalc()">🧮 Tính thử</button>
+        <button class="btn btn-ghost" onclick="closeModal('modal-create-payroll')">Huỷ</button>
+        <button class="btn btn-primary" onclick="submitCreatePayroll()">Lưu phiếu lương</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Sửa phiếu lương -->
+  <div id="modal-edit-payroll" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:520px">
+      <div class="modal-header">
+        <h3>✏️ Sửa phiếu lương</h3>
+        <button class="btn-close" onclick="closeModal('modal-edit-payroll')">×</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <input type="hidden" id="ep-id">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Lương cơ bản (đ)</label>
+            <input id="ep-basic" type="number" class="form-control">
+          </div>
+          <div class="form-group">
+            <label>Phụ cấp (đ)</label>
+            <input id="ep-allowance" type="number" class="form-control">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Thưởng (đ)</label>
+            <input id="ep-bonus" type="number" class="form-control">
+          </div>
+          <div class="form-group">
+            <label>Ngày công</label>
+            <input id="ep-workdays" type="number" class="form-control">
+          </div>
+          <div class="form-group">
+            <label>Người phụ thuộc</label>
+            <input id="ep-dependents" type="number" class="form-control" value="0">
+          </div>
+        </div>
+        <div id="ep-preview" style="display:none;background:#F4F4F2;border-radius:10px;padding:14px">
+          <div style="font-weight:600;margin-bottom:10px">📊 Kết quả tính lại</div>
+          <div id="ep-preview-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="previewEditCalc()">🧮 Tính lại</button>
+        <button class="btn btn-ghost" onclick="closeModal('modal-edit-payroll')">Huỷ</button>
+        <button class="btn btn-primary" onclick="submitEditPayroll()">Lưu thay đổi</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Tính thử lương (standalone) -->
+  <div id="modal-calc" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:460px">
+      <div class="modal-header">
+        <h3>🧮 Máy tính lương</h3>
+        <button class="btn-close" onclick="closeModal('modal-calc')">×</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div class="form-group"><label>Lương cơ bản</label>
+            <input id="calc-basic" type="number" class="form-control" placeholder="15000000"></div>
+          <div class="form-group"><label>Phụ cấp</label>
+            <input id="calc-allowance" type="number" class="form-control" placeholder="0" value="0"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+          <div class="form-group"><label>Thưởng</label>
+            <input id="calc-bonus" type="number" class="form-control" value="0"></div>
+          <div class="form-group"><label>Ngày công</label>
+            <input id="calc-wd" type="number" class="form-control" value="26"></div>
+          <div class="form-group"><label>Người PT</label>
+            <input id="calc-dep" type="number" class="form-control" value="0"></div>
+        </div>
+        <button class="btn btn-primary" onclick="runCalc()">Tính ngay</button>
+        <div id="calc-result" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ──────── PAYROLL JS ────────
+let _prData = [];
+let _prNsList = [];
+
+function initPayroll() {
+  google.script.run.withSuccessHandler(res => {
+    _prNsList = res.success ? res.data.filter(n => n.Trang_Thai !== 'Đã nghỉ') : [];
+    const sel = document.getElementById('cp-ns');
+    _prNsList.forEach(ns => {
+      sel.appendChild(new Option(
+        ns.Ho_Ten + ' — ' + (ns.Bo_Phan || ''),
+        ns.ID_NhanSu + '|' + ns.Ho_Ten + '|' + (ns.Bo_Phan || '')
+      ));
+    });
+    document.getElementById('cp-period').value = getCurrentMonthPeriod();
+    loadPayrollTable();
+  }).handleRequest({ action: 'GET_NHAN_SU_LIST', payload: {} });
+}
+
+function getCurrentMonthPeriod() {
+  const now = new Date();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  return m + '/' + now.getFullYear();
+}
+
+function loadPayrollTable() {
+  const period = document.getElementById('pr-period-filter').value;
+  const status = document.getElementById('pr-status-filter').value;
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      _prData = res.data;
+      renderPayrollTable(status);
+      updatePayrollCards();
+    })
+    .handleRequest({ action: 'GET_PAYROLL_LIST', payload: { period, status: status || undefined } });
+}
+
+function updatePayrollCards() {
+  const fmt = n => (n||0).toLocaleString('vi-VN') + ' đ';
+  const totalGross = _prData.reduce((s, r) => s + (parseFloat(r.Gross_Salary)||0), 0);
+  const totalNet   = _prData.reduce((s, r) => s + (parseFloat(r.Net_Salary)||0), 0);
+  const totalEr    = _prData.reduce((s, r) => s + (parseFloat(r.BHXH_Employer)||0), 0);
+  const approved   = _prData.filter(r => r.Status === 'Approved' || r.Status === 'Paid').length;
+
+  document.getElementById('pr-total-gross').textContent = fmt(totalGross);
+  document.getElementById('pr-total-net').textContent   = fmt(totalNet);
+  document.getElementById('pr-total-cost').textContent  = fmt(totalGross + totalEr);
+  document.getElementById('pr-count').textContent = _prData.length + ' / ' + approved + ' duyệt';
+}
+
+function renderPayrollTable(statusFilter) {
+  let data = statusFilter ? _prData.filter(r => r.Status === statusFilter) : _prData;
+  const tbody = document.getElementById('pr-tbody');
+  const tfoot = document.getElementById('pr-tfoot');
+
+  if (data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-3);padding:40px">Không có dữ liệu phiếu lương</td></tr>';
+    tfoot.innerHTML = '';
+    return;
+  }
+
+  const fmt = n => (parseFloat(n)||0).toLocaleString('vi-VN');
+  const statusMap = {
+    Draft:    ['#888','#F4F4F2','Nháp'],
+    Approved: ['#BA7517','#FAEEDA','Đã duyệt'],
+    Paid:     ['#1D9E75','#E1F5EE','Đã trả']
+  };
+
+  tbody.innerHTML = data.map(r => {
+    const [sc, bg, lbl] = statusMap[r.Status] || ['#888','#eee',r.Status];
+    return '<tr>' +
+      '<td><span style="font-weight:600">' + esc(r.Ho_Ten) + '</span></td>' +
+      '<td style="color:var(--text-3)">' + esc(r.Bo_Phan||'') + '</td>' +
+      '<td style="text-align:right">' + fmt(r.Basic_Salary) + '</td>' +
+      '<td style="text-align:right;font-weight:600">' + fmt(r.Gross_Salary) + '</td>' +
+      '<td style="text-align:right;color:#C0392B">-' + fmt(r.Total_Insurance) + '</td>' +
+      '<td style="text-align:right;color:#C0392B">-' + fmt(r.Tax_PIT) + '</td>' +
+      '<td style="text-align:right;font-weight:700;color:#085041">' + fmt(r.Net_Salary) + '</td>' +
+      '<td style="text-align:center">' + (r.Work_Days||'26') + '/' + (r.Standard_Days||'26') + '</td>' +
+      '<td style="text-align:center"><span style="color:' + sc + ';background:' + bg +
+        ';padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600">' + lbl + '</span></td>' +
+      '<td><div style="display:flex;gap:4px;flex-wrap:wrap">' +
+        '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px" ' +
+          'onclick="openEditPayroll(\'' + r.ID_Payroll + '\',' + r.Basic_Salary + ',' + r.Allowance + ',' + r.Bonus + ',' + r.Work_Days + ')">✏️</button>' +
+        (r.Status === 'Draft'
+          ? '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px" ' +
+              'onclick="changeStatus(\'' + r.ID_Payroll + '\',\'Approved\')">✅ Duyệt</button>' : '') +
+        (r.Status === 'Approved'
+          ? '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px" ' +
+              'onclick="changeStatus(\'' + r.ID_Payroll + '\',\'Paid\')">💳 Đã trả</button>' : '') +
+        '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px" ' +
+          'onclick="doSendPayslip(\'' + r.ID_Payroll + '\',\'' + esc(r.Ho_Ten) + '\')">📧</button>' +
+      '</div></td>' +
+      '</tr>';
+  }).join('');
+
+  // Totals footer
+  const sumGross = data.reduce((s, r) => s + (parseFloat(r.Gross_Salary)||0), 0);
+  const sumNet   = data.reduce((s, r) => s + (parseFloat(r.Net_Salary)||0), 0);
+  const sumIns   = data.reduce((s, r) => s + (parseFloat(r.Total_Insurance)||0), 0);
+  const sumTax   = data.reduce((s, r) => s + (parseFloat(r.Tax_PIT)||0), 0);
+  tfoot.innerHTML =
+    '<tr style="background:#F4F4F2;font-weight:700;border-top:2px solid var(--border-color,#ddd)">' +
+    '<td colspan="3" style="padding:8px 12px">Tổng cộng (' + data.length + ' người)</td>' +
+    '<td style="text-align:right;padding:8px 12px">' + fmt(sumGross) + '</td>' +
+    '<td style="text-align:right;color:#C0392B;padding:8px 12px">-' + fmt(sumIns) + '</td>' +
+    '<td style="text-align:right;color:#C0392B;padding:8px 12px">-' + fmt(sumTax) + '</td>' +
+    '<td style="text-align:right;color:#085041;padding:8px 12px">' + fmt(sumNet) + '</td>' +
+    '<td colspan="3"></td></tr>';
+}
+
+function filterPayrollTable() {
+  const q = document.getElementById('pr-search').value.toLowerCase();
+  document.querySelectorAll('#pr-tbody tr').forEach(tr => {
+    tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+
+function openCreatePayrollModal() {
+  document.getElementById('cp-period').value = getCurrentMonthPeriod();
+  document.getElementById('cp-preview').style.display = 'none';
+  document.getElementById('modal-create-payroll').style.display = 'flex';
+}
+
+function prefillNsPayroll() {
+  const val = document.getElementById('cp-ns').value;
+  // Try load attendance workdays
+}
+
+function previewSalaryCalc() {
+  const payload = getCreatePayrollPayload();
+  if (!payload) return;
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) showCalcPreview('cp-preview', 'cp-preview-grid', res.data);
+      else showToast(res.error, 'error');
+    })
+    .handleRequest({ action: 'CALC_SALARY_PREVIEW', payload });
+}
+
+function getCreatePayrollPayload() {
+  const nsVal = document.getElementById('cp-ns').value;
+  if (!nsVal) { showToast('Chọn nhân sự', 'error'); return null; }
+  const [nsId, hoTen, boPhan] = nsVal.split('|');
+  return {
+    id_nhan_su: nsId, ho_ten: hoTen, bo_phan: boPhan,
+    period:     document.getElementById('cp-period').value,
+    basic_salary:  parseFloat(document.getElementById('cp-basic').value) || 0,
+    allowance:     parseFloat(document.getElementById('cp-allowance').value) || 0,
+    bonus:         parseFloat(document.getElementById('cp-bonus').value) || 0,
+    work_days:     parseFloat(document.getElementById('cp-workdays').value) || 26,
+    standard_days: 26,
+    dependents:    parseInt(document.getElementById('cp-dependents').value) || 0,
+    note:          document.getElementById('cp-note').value,
+  };
+}
+
+function submitCreatePayroll() {
+  const payload = getCreatePayrollPayload();
+  if (!payload) return;
+  if (!payload.period) { showToast('Vui lòng nhập kỳ lương', 'error'); return; }
+  if (!payload.basic_salary) { showToast('Vui lòng nhập lương cơ bản', 'error'); return; }
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        showToast('Đã tạo phiếu lương ✅');
+        closeModal('modal-create-payroll');
+        loadPayrollTable();
+      } else { showToast(res.error, 'error'); }
+    })
+    .handleRequest({ action: 'CREATE_PAYROLL', payload });
+}
+
+function openEditPayroll(id, basic, allowance, bonus, workDays) {
+  document.getElementById('ep-id').value = id;
+  document.getElementById('ep-basic').value = basic;
+  document.getElementById('ep-allowance').value = allowance;
+  document.getElementById('ep-bonus').value = bonus;
+  document.getElementById('ep-workdays').value = workDays;
+  document.getElementById('ep-preview').style.display = 'none';
+  document.getElementById('modal-edit-payroll').style.display = 'flex';
+}
+
+function previewEditCalc() {
+  const payload = {
+    basic_salary:  parseFloat(document.getElementById('ep-basic').value) || 0,
+    allowance:     parseFloat(document.getElementById('ep-allowance').value) || 0,
+    bonus:         parseFloat(document.getElementById('ep-bonus').value) || 0,
+    work_days:     parseFloat(document.getElementById('ep-workdays').value) || 26,
+    standard_days: 26,
+    dependents:    parseInt(document.getElementById('ep-dependents').value) || 0,
+  };
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) showCalcPreview('ep-preview', 'ep-preview-grid', res.data);
+    })
+    .handleRequest({ action: 'CALC_SALARY_PREVIEW', payload });
+}
+
+function submitEditPayroll() {
+  const id = document.getElementById('ep-id').value;
+  if (!id) return;
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        showToast('Đã cập nhật phiếu lương ✅');
+        closeModal('modal-edit-payroll');
+        loadPayrollTable();
+      } else { showToast(res.error, 'error'); }
+    })
+    .handleRequest({
+      action: 'UPDATE_PAYROLL',
+      payload: {
+        id,
+        basic_salary:  parseFloat(document.getElementById('ep-basic').value),
+        allowance:     parseFloat(document.getElementById('ep-allowance').value),
+        bonus:         parseFloat(document.getElementById('ep-bonus').value),
+        work_days:     parseFloat(document.getElementById('ep-workdays').value),
+        dependents:    parseInt(document.getElementById('ep-dependents').value) || 0,
+      }
+    });
+}
+
+function changeStatus(id, newStatus) {
+  const label = newStatus === 'Approved' ? 'duyệt' : 'đánh dấu đã trả';
+  if (!confirm('Xác nhận ' + label + ' phiếu lương này?')) return;
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) { showToast(res.message + ' ✅'); loadPayrollTable(); }
+      else showToast(res.error, 'error');
+    })
+    .handleRequest({ action: 'UPDATE_PAYROLL_STATUS', payload: { id, status: newStatus } });
+}
+
+function doSendPayslip(id, name) {
+  if (!confirm('Gửi phiếu lương cho ' + name + ' qua email?')) return;
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) showToast(res.message + ' ✅');
+      else showToast(res.error, 'error');
+    })
+    .handleRequest({ action: 'SEND_PAYSLIP', payload: { id } });
+}
+
+function openCalcModal() {
+  document.getElementById('calc-result').style.display = 'none';
+  document.getElementById('modal-calc').style.display = 'flex';
+}
+
+function runCalc() {
+  const payload = {
+    basic_salary:  parseFloat(document.getElementById('calc-basic').value) || 0,
+    allowance:     parseFloat(document.getElementById('calc-allowance').value) || 0,
+    bonus:         parseFloat(document.getElementById('calc-bonus').value) || 0,
+    work_days:     parseFloat(document.getElementById('calc-wd').value) || 26,
+    standard_days: 26,
+    dependents:    parseInt(document.getElementById('calc-dep').value) || 0,
+  };
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        const d = res.data;
+        const fmt = n => (parseFloat(n)||0).toLocaleString('vi-VN') + ' đ';
+        const el = document.getElementById('calc-result');
+        el.style.display = 'block';
+        el.innerHTML =
+          '<div style="background:#F7F6F3;border-radius:10px;padding:14px;margin-top:10px">' +
+          buildCalcResultHtml(d) + '</div>';
+      }
+    })
+    .handleRequest({ action: 'CALC_SALARY_PREVIEW', payload });
+}
+
+function showCalcPreview(containerId, gridId, d) {
+  document.getElementById(containerId).style.display = 'block';
+  document.getElementById(gridId).innerHTML = buildCalcResultHtml(d);
+}
+
+function buildCalcResultHtml(d) {
+  const fmt = n => (parseFloat(n)||0).toLocaleString('vi-VN') + ' đ';
+  const rows = [
+    ['Gross (Tổng thu nhập)', fmt(d.gross_salary), '#085041'],
+    ['BHXH NLĐ (8%)', '-' + fmt(d.bhxh_employee), '#C0392B'],
+    ['BHYT NLĐ (1.5%)', '-' + fmt(d.bhyt_employee), '#C0392B'],
+    ['BHTN NLĐ (1%)', '-' + fmt(d.bhtn_employee), '#C0392B'],
+    ['Thuế TNCN', '-' + fmt(d.tax_pit), '#C0392B'],
+    ['💰 NET (Thực lãnh)', fmt(d.net_salary), '#1D9E75'],
+    ['Chi phí NSDLĐ (BHXH 17.5%)', fmt(d.bhxh_employer), '#3D35A8'],
+  ];
+  return rows.map(([label, val, color]) =>
+    '<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #eee;font-size:13px">' +
+    '<span>' + label + '</span>' +
+    '<span style="font-weight:600;color:' + color + '">' + val + '</span></div>'
+  ).join('');
+}
+
+function exportCsv() {
+  const period = document.getElementById('pr-period-filter').value;
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      const blob = new Blob(['\uFEFF' + res.csv], { type: 'text/csv;charset=utf-8;' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = 'Payroll_' + period.replace('/', '_') + '.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      showToast('Đã xuất ' + res.count + ' phiếu lương ✅');
+    })
+    .handleRequest({ action: 'EXPORT_PAYROLL_CSV', payload: { period } });
+}
+
+function esc(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+initPayroll();
+</script>`;
+}
+
+// =============================================================================
+// MODULE 36B — UI: Tab Nghỉ phép
+// =============================================================================
+
+function getLeaveTabHtml() {
+  return `
+<div id="view-leave">
+  <div class="topbar">
+    <div>
+      <h2 class="page-title">🌴 Quản lý nghỉ phép</h2>
+      <p style="color:var(--text-3);font-size:13px;margin:0">Đơn xin nghỉ, phê duyệt và theo dõi số ngày phép</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button class="btn btn-primary" onclick="openLeaveModal()">+ Tạo đơn nghỉ</button>
+    </div>
+  </div>
+
+  <!-- Summary Cards -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px">
+    <div class="metric-card" style="border-top:3px solid #BA7517">
+      <div class="metric-label">Đang chờ duyệt</div>
+      <div class="metric-value" id="lv-pending" style="color:#BA7517">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #1D9E75">
+      <div class="metric-label">Đã duyệt tháng này</div>
+      <div class="metric-value" id="lv-approved" style="color:#1D9E75">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #C0392B">
+      <div class="metric-label">Đã từ chối</div>
+      <div class="metric-value" id="lv-rejected" style="color:#C0392B">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #3D35A8">
+      <div class="metric-label">Tổng ngày đã nghỉ</div>
+      <div class="metric-value" id="lv-total-days" style="color:#3D35A8">—</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px">
+    <!-- Bảng đơn nghỉ phép -->
+    <div class="panel">
+      <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Danh sách đơn nghỉ phép</span>
+        <div style="display:flex;gap:8px">
+          <select id="lv-status-filter" class="form-control" style="width:130px" onchange="loadLeaveTable()">
+            <option value="">Tất cả</option>
+            <option value="Pending">Chờ duyệt</option>
+            <option value="Approved">Đã duyệt</option>
+            <option value="Rejected">Từ chối</option>
+          </select>
+        </div>
+      </div>
+      <div class="panel-body" style="padding:0;overflow-x:auto">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Nhân sự</th><th>Loại nghỉ</th><th>Từ ngày</th>
+              <th>Đến ngày</th><th style="text-align:center">Số ngày</th>
+              <th>Trạng thái</th><th>Thao tác</th>
+            </tr>
+          </thead>
+          <tbody id="lv-tbody">
+            <tr><td colspan="7" style="text-align:center;color:var(--text-3);padding:40px">Đang tải...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Số dư ngày phép -->
+    <div class="panel">
+      <div class="panel-header">📊 Số dư ngày phép</div>
+      <div class="panel-body">
+        <select id="lv-balance-ns" class="form-control" style="margin-bottom:12px"
+                onchange="loadLeaveBalance()">
+          <option value="">-- Chọn nhân sự --</option>
+        </select>
+        <div id="lv-balance-area" style="text-align:center;color:var(--text-3);padding:20px">
+          Chọn nhân sự để xem số dư
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Tạo đơn nghỉ -->
+  <div id="modal-leave" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:480px">
+      <div class="modal-header">
+        <h3>+ Tạo đơn xin nghỉ phép</h3>
+        <button class="btn-close" onclick="closeModal('modal-leave')">×</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <div class="form-group">
+          <label>Nhân sự *</label>
+          <select id="lv-ns" class="form-control"></select>
+        </div>
+        <div class="form-group">
+          <label>Loại nghỉ *</label>
+          <select id="lv-type" class="form-control">
+            <option>Nghỉ phép năm</option><option>Nghỉ bệnh</option>
+            <option>Nghỉ không lương</option><option>Nghỉ thai sản</option>
+            <option>Nghỉ hôn sự</option><option>Nghỉ đám tang</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Từ ngày *</label>
+            <input type="date" id="lv-from" class="form-control" onchange="calcLeaveDays()">
+          </div>
+          <div class="form-group">
+            <label>Đến ngày *</label>
+            <input type="date" id="lv-to" class="form-control" onchange="calcLeaveDays()">
+          </div>
+        </div>
+        <div style="background:#F4F4F2;border-radius:8px;padding:10px;text-align:center;display:none" id="lv-days-preview">
+          <span style="font-size:16px;font-weight:700;color:#3D35A8">Dự kiến: <span id="lv-days-count">0</span> ngày làm việc</span>
+        </div>
+        <div class="form-group">
+          <label>Lý do</label>
+          <textarea id="lv-reason" class="form-control" rows="3" placeholder="Mô tả lý do nghỉ..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Người duyệt (email)</label>
+          <input id="lv-approver" class="form-control" placeholder="manager@company.com">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('modal-leave')">Huỷ</button>
+        <button class="btn btn-primary" onclick="submitLeaveRequest()">Gửi đơn</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Từ chối -->
+  <div id="modal-reject-leave" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:380px">
+      <div class="modal-header">
+        <h3>❌ Từ chối đơn nghỉ</h3>
+        <button class="btn-close" onclick="closeModal('modal-reject-leave')">×</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="reject-leave-id">
+        <div class="form-group">
+          <label>Lý do từ chối *</label>
+          <textarea id="reject-reason" class="form-control" rows="3"
+                    placeholder="Nhập lý do từ chối..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('modal-reject-leave')">Huỷ</button>
+        <button class="btn btn-danger" onclick="submitRejectLeave()">Từ chối</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ──────── LEAVE JS ────────
+let _lvNsList = [];
+
+function initLeave() {
+  google.script.run.withSuccessHandler(res => {
+    _lvNsList = res.success ? res.data.filter(n => n.Trang_Thai !== 'Đã nghỉ') : [];
+    ['lv-ns','lv-balance-ns'].forEach(selId => {
+      const sel = document.getElementById(selId);
+      if (!sel) return;
+      _lvNsList.forEach(ns => {
+        sel.appendChild(new Option(
+          ns.Ho_Ten + ' — ' + (ns.Bo_Phan||''),
+          ns.ID_NhanSu + '|' + ns.Ho_Ten + '|' + (ns.Bo_Phan||'')
+        ));
+      });
+    });
+    loadLeaveTable();
+  }).handleRequest({ action: 'GET_NHAN_SU_LIST', payload: {} });
+}
+
+function loadLeaveTable() {
+  const status = document.getElementById('lv-status-filter').value;
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (!res.success) return;
+      const data = res.data;
+      updateLeaveCards(data);
+      renderLeaveTable(data);
+    })
+    .handleRequest({ action: 'GET_LEAVE_LIST', payload: { status: status || undefined } });
+}
+
+function updateLeaveCards(data) {
+  document.getElementById('lv-pending').textContent  = data.filter(r => r.Status === 'Pending').length;
+  document.getElementById('lv-approved').textContent = data.filter(r => r.Status === 'Approved').length;
+  document.getElementById('lv-rejected').textContent = data.filter(r => r.Status === 'Rejected').length;
+  const totalDays = data.filter(r => r.Status === 'Approved')
+    .reduce((s, r) => s + (parseFloat(r.Days)||0), 0);
+  document.getElementById('lv-total-days').textContent = totalDays + ' ngày';
+}
+
+function renderLeaveTable(data) {
+  const tbody = document.getElementById('lv-tbody');
+  if (data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-3);padding:40px">Không có đơn nghỉ phép</td></tr>';
+    return;
+  }
+  const statusMap = {
+    Pending:   ['#BA7517','#FAEEDA','⏳ Chờ duyệt'],
+    Approved:  ['#1D9E75','#E1F5EE','✅ Đã duyệt'],
+    Rejected:  ['#C0392B','#FCEBEB','❌ Từ chối'],
+    Cancelled: ['#888','#F4F4F2','🚫 Huỷ'],
+  };
+  const fmtDate = iso => iso ? new Date(iso).toLocaleDateString('vi-VN') : '—';
+
+  tbody.innerHTML = data.map(r => {
+    const [sc, bg, lbl] = statusMap[r.Status] || ['#888','#eee',r.Status];
+    const typeColors = {
+      'Nghỉ phép năm': '#EEEDFE', 'Nghỉ bệnh': '#FAEEDA',
+      'Nghỉ không lương': '#FCEBEB', 'Nghỉ thai sản': '#E6F1FB',
+    };
+    return '<tr>' +
+      '<td><span style="font-weight:600">' + esc(r.Ho_Ten) + '</span><br>' +
+        '<small style="color:var(--text-3)">' + esc(r.Bo_Phan||'') + '</small></td>' +
+      '<td><span style="background:' + (typeColors[r.Leave_Type]||'#eee') +
+        ';padding:2px 8px;border-radius:10px;font-size:12px">' + esc(r.Leave_Type) + '</span></td>' +
+      '<td>' + fmtDate(r.From_Date) + '</td>' +
+      '<td>' + fmtDate(r.To_Date) + '</td>' +
+      '<td style="text-align:center;font-weight:700">' + (r.Days||'—') + '</td>' +
+      '<td><span style="color:' + sc + ';background:' + bg +
+        ';padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600">' + lbl + '</span></td>' +
+      '<td>' + (r.Status === 'Pending'
+        ? '<div style="display:flex;gap:4px">' +
+            '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:#1D9E75" ' +
+              'onclick="approveLeave(\'' + r.ID_Leave + '\')">✅ Duyệt</button>' +
+            '<button class="btn btn-ghost" style="font-size:11px;padding:3px 8px;color:#C0392B" ' +
+              'onclick="openRejectModal(\'' + r.ID_Leave + '\')">❌ Từ chối</button>' +
+          '</div>'
+        : '<span style="color:var(--text-3);font-size:12px">' + esc(r.Approved_At ? fmtDate(r.Approved_At) : '') + '</span>'
+      ) + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function calcLeaveDays() {
+  const from = document.getElementById('lv-from').value;
+  const to   = document.getElementById('lv-to').value;
+  if (!from || !to) return;
+  const f = new Date(from); const t = new Date(to);
+  if (t < f) { document.getElementById('lv-days-preview').style.display = 'none'; return; }
+  let count = 0; const d = new Date(f);
+  while (d <= t) { if (d.getDay() !== 0 && d.getDay() !== 6) count++; d.setDate(d.getDate() + 1); }
+  document.getElementById('lv-days-count').textContent = count;
+  document.getElementById('lv-days-preview').style.display = 'block';
+}
+
+function openLeaveModal() {
+  document.getElementById('lv-days-preview').style.display = 'none';
+  document.getElementById('lv-reason').value = '';
+  document.getElementById('lv-approver').value = '';
+  document.getElementById('modal-leave').style.display = 'flex';
+}
+
+function submitLeaveRequest() {
+  const nsVal = document.getElementById('lv-ns').value;
+  if (!nsVal) { showToast('Chọn nhân sự', 'error'); return; }
+  const [nsId, hoTen, boPhan] = nsVal.split('|');
+  const from = document.getElementById('lv-from').value;
+  const to   = document.getElementById('lv-to').value;
+  if (!from || !to) { showToast('Vui lòng chọn ngày nghỉ', 'error'); return; }
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        showToast('Đã gửi đơn nghỉ (' + res.days + ' ngày) ✅');
+        closeModal('modal-leave');
+        loadLeaveTable();
+      } else { showToast(res.error, 'error'); }
+    })
+    .handleRequest({
+      action: 'CREATE_LEAVE_REQUEST',
+      payload: {
+        id_nhan_su: nsId, ho_ten: hoTen, bo_phan: boPhan,
+        leave_type: document.getElementById('lv-type').value,
+        from_date: from, to_date: to,
+        reason: document.getElementById('lv-reason').value,
+        approver: document.getElementById('lv-approver').value,
+      }
+    });
+}
+
+function approveLeave(id) {
+  if (!confirm('Duyệt đơn nghỉ phép này?')) return;
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) { showToast(res.message + ' ✅'); loadLeaveTable(); }
+      else showToast(res.error, 'error');
+    })
+    .handleRequest({ action: 'PROCESS_LEAVE_REQUEST', payload: { id, action: 'Approved' } });
+}
+
+function openRejectModal(id) {
+  document.getElementById('reject-leave-id').value = id;
+  document.getElementById('reject-reason').value = '';
+  document.getElementById('modal-reject-leave').style.display = 'flex';
+}
+
+function submitRejectLeave() {
+  const id     = document.getElementById('reject-leave-id').value;
+  const reason = document.getElementById('reject-reason').value.trim();
+  if (!reason) { showToast('Vui lòng nhập lý do từ chối', 'error'); return; }
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) { showToast('Đã từ chối đơn ✅'); closeModal('modal-reject-leave'); loadLeaveTable(); }
+      else showToast(res.error, 'error');
+    })
+    .handleRequest({ action: 'PROCESS_LEAVE_REQUEST', payload: { id, action: 'Rejected', reject_reason: reason } });
+}
+
+function loadLeaveBalance() {
+  const val = document.getElementById('lv-balance-ns').value;
+  if (!val) return;
+  const [nsId] = val.split('|');
+  const year = new Date().getFullYear();
+  google.script.run
+    .withSuccessHandler(res => {
+      const area = document.getElementById('lv-balance-area');
+      const balance = res.data !== null ? res.data : 12;
+      const used    = 12 - balance;
+      const pct     = Math.round((used / 12) * 100);
+      area.innerHTML =
+        '<div style="font-size:40px;font-weight:800;color:#3D35A8">' + balance + '</div>' +
+        '<div style="color:var(--text-3);margin-bottom:10px">ngày phép còn lại năm ' + year + '</div>' +
+        '<div style="background:#E0DDD8;border-radius:8px;height:10px;margin-bottom:8px">' +
+          '<div style="height:100%;background:#3D35A8;border-radius:8px;width:' + pct + '%"></div>' +
+        '</div>' +
+        '<div style="font-size:13px;color:var(--text-3)">' + Math.max(0,used) + '/12 ngày đã dùng</div>';
+    })
+    .handleRequest({ action: 'GET_LEAVE_BALANCE', payload: { nsId, year } });
+}
+
+function esc(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+initLeave();
+</script>`;
+}
+
+// =============================================================================
+// MODULE 36C — UI: Tab Báo cáo HR
+// =============================================================================
+
+function getReportsTabHtml() {
+  return `
+<div id="view-reports">
+  <div class="topbar">
+    <div>
+      <h2 class="page-title">📊 Báo cáo HR</h2>
+      <p style="color:var(--text-3);font-size:13px;margin:0">Tổng hợp nhân sự, lương, nghỉ phép và phân tích AI</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <select id="rp-period" class="form-control" style="width:120px">
+        <option value="01/2026">T01/2026</option><option value="02/2026">T02/2026</option>
+        <option value="03/2026">T03/2026</option><option value="04/2026">T04/2026</option>
+        <option value="05/2026" selected>T05/2026</option><option value="06/2026">T06/2026</option>
+      </select>
+      <button class="btn btn-primary" onclick="loadMonthlyReport()">📋 Tạo báo cáo</button>
+      <button class="btn btn-ghost"   onclick="loadTurnoverReport()">📉 Turnover</button>
+      <button class="btn btn-ghost"   onclick="loadAiInsights()" id="ai-insight-btn">✨ AI Phân tích</button>
+    </div>
+  </div>
+
+  <!-- AI Insights panel -->
+  <div id="rp-ai-panel" style="display:none;margin-bottom:20px">
+    <div class="panel">
+      <div class="panel-header" style="display:flex;justify-content:space-between">
+        <span>🤖 AI Insights</span>
+        <span id="rp-ai-health" style="font-size:12px;padding:2px 10px;border-radius:20px"></span>
+      </div>
+      <div class="panel-body">
+        <p id="rp-ai-summary" style="color:var(--text-2);margin-bottom:14px"></p>
+        <div id="rp-ai-insights" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Monthly Report Grid -->
+  <div id="rp-monthly" style="display:none">
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px">
+
+      <!-- Headcount -->
+      <div class="panel">
+        <div class="panel-header">👥 Nhân sự</div>
+        <div class="panel-body" id="rp-headcount"></div>
+      </div>
+
+      <!-- Tuyển dụng -->
+      <div class="panel">
+        <div class="panel-header">🎯 Tuyển dụng</div>
+        <div class="panel-body" id="rp-recruitment"></div>
+      </div>
+
+      <!-- Nghỉ phép -->
+      <div class="panel">
+        <div class="panel-header">🌴 Nghỉ phép</div>
+        <div class="panel-body" id="rp-leave"></div>
+      </div>
+    </div>
+
+    <!-- Payroll + KPI -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="panel">
+        <div class="panel-header">💰 Chi phí lương</div>
+        <div class="panel-body" id="rp-payroll"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">🎯 KPI tổng quan</div>
+        <div class="panel-body" id="rp-kpi"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Turnover Report -->
+  <div id="rp-turnover" style="display:none">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="panel">
+        <div class="panel-header">📉 Tỷ lệ nghỉ việc</div>
+        <div class="panel-body" id="rp-turnover-summary"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">📊 Theo bộ phận</div>
+        <div class="panel-body" id="rp-turnover-dept"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ──────── REPORTS JS ────────
+function loadMonthlyReport() {
+  const period = document.getElementById('rp-period').value;
+  showLoading();
+  document.getElementById('rp-turnover').style.display = 'none';
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      const d = res.data;
+      document.getElementById('rp-monthly').style.display = 'block';
+      renderHeadcount(d.headcount || {});
+      renderRecruitment(d.recruitment || {});
+      renderLeaveReport(d.leave || {});
+      renderPayrollReport(d.payroll || {});
+      renderKpiReport(d.kpi || {});
+      showToast('Báo cáo tháng ' + period + ' đã tải ✅');
+    })
+    .handleRequest({ action: 'GET_MONTHLY_REPORT', payload: { period } });
+}
+
+function renderHeadcount(d) {
+  const el = document.getElementById('rp-headcount');
+  const fmt = n => (n || 0).toLocaleString('vi-VN');
+  el.innerHTML = buildStatRows([
+    ['Tổng nhân sự active', fmt(d.total_active), '#3D35A8'],
+    ['Chính thức', fmt(d.chinh_thuc), '#1D9E75'],
+    ['Thử việc', fmt(d.thu_viec), '#BA7517'],
+    ['Thực tập', fmt(d.thuc_tap), '#888'],
+    ['Đã nghỉ (lịch sử)', fmt(d.da_nghi), '#C0392B'],
+  ]);
+  if (d.by_department) {
+    el.innerHTML += '<div style="margin-top:12px;font-size:13px;font-weight:600;color:var(--text-1);margin-bottom:6px">Theo bộ phận:</div>';
+    el.innerHTML += Object.entries(d.by_department).map(([dept, cnt]) =>
+      '<div style="display:flex;justify-content:space-between;padding:4px 8px;background:#F4F4F2;' +
+      'border-radius:6px;margin-bottom:4px;font-size:13px"><span>' + dept + '</span>' +
+      '<strong>' + cnt + '</strong></div>'
+    ).join('');
+  }
+}
+
+function renderRecruitment(d) {
+  document.getElementById('rp-recruitment').innerHTML = buildStatRows([
+    ['Tổng CV',    (d.total_cv||0).toLocaleString(), '#3D35A8'],
+    ['Đang xét',  (d.dang_xet||0).toLocaleString(), '#BA7517'],
+    ['Đã offer',  (d.da_offer||0).toLocaleString(), '#1D9E75'],
+    ['Từ chối',   (d.tu_choi||0).toLocaleString(), '#C0392B'],
+  ]);
+}
+
+function renderLeaveReport(d) {
+  const fmt = n => (n||0).toLocaleString('vi-VN');
+  document.getElementById('rp-leave').innerHTML = buildStatRows([
+    ['Tổng đơn',     fmt(d.total_requests), '#3D35A8'],
+    ['Tổng ngày',    fmt(d.total_days) + ' ngày', '#1D9E75'],
+  ]) + (d.by_type
+    ? '<div style="margin-top:12px;font-size:13px;font-weight:600;color:var(--text-1);margin-bottom:6px">Theo loại:</div>' +
+      Object.entries(d.by_type).map(([t, cnt]) =>
+        '<div style="display:flex;justify-content:space-between;padding:4px 8px;' +
+        'background:#F4F4F2;border-radius:6px;margin-bottom:4px;font-size:13px">' +
+        '<span>' + t + '</span><strong>' + cnt + ' ngày</strong></div>'
+      ).join('')
+    : '');
+}
+
+function renderPayrollReport(d) {
+  const fmt = n => (n||0).toLocaleString('vi-VN') + ' đ';
+  document.getElementById('rp-payroll').innerHTML = buildStatRows([
+    ['Số phiếu',     (d.record_count||0) + ' phiếu', '#3D35A8'],
+    ['Tổng Gross',   fmt(d.total_gross), '#085041'],
+    ['Tổng Net',     fmt(d.total_net), '#1D9E75'],
+    ['Chi phí NSDLĐ',fmt(d.total_er_cost), '#BA7517'],
+    ['Tổng chi phí', fmt(d.total_cost), '#C0392B'],
+    ['Lương Net bình quân', fmt(d.avg_net), '#3D35A8'],
+  ]);
+}
+
+function renderKpiReport(d) {
+  const el = document.getElementById('rp-kpi');
+  const scoreColor = (d.avg_score||0) >= 100 ? '#1D9E75'
+    : (d.avg_score||0) >= 80 ? '#BA7517' : '#C0392B';
+  el.innerHTML =
+    '<div style="text-align:center;margin-bottom:14px">' +
+    '<div style="font-size:40px;font-weight:800;color:' + scoreColor + '">' + (d.avg_score||0) + '%</div>' +
+    '<div style="color:var(--text-3);font-size:13px">Điểm KPI trung bình</div>' +
+    '</div>' +
+    buildStatRows([
+      ['Tổng KPI', (d.total_kpis||0) + ' KPI', '#3D35A8'],
+      ['Đã nhập kết quả', (d.scored_kpis||0) + ' KPI', '#888'],
+      ['Đạt ≥ 100%', (d.above_100||0) + ' người', '#1D9E75'],
+      ['Dưới 80%',   (d.below_80||0) + ' người', '#C0392B'],
+    ]);
+}
+
+function buildStatRows(rows) {
+  return rows.map(([label, val, color]) =>
+    '<div style="display:flex;justify-content:space-between;padding:7px 0;' +
+    'border-bottom:1px solid #F0EEE8;font-size:13px">' +
+    '<span style="color:var(--text-2)">' + label + '</span>' +
+    '<span style="font-weight:700;color:' + color + '">' + val + '</span>' +
+    '</div>'
+  ).join('');
+}
+
+function loadTurnoverReport() {
+  const year = new Date().getFullYear();
+  showLoading();
+  document.getElementById('rp-monthly').style.display = 'none';
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      const d = res.data;
+      document.getElementById('rp-turnover').style.display = 'block';
+      const s = d.summary || {};
+      document.getElementById('rp-turnover-summary').innerHTML =
+        '<div style="text-align:center;margin-bottom:16px">' +
+        '<div style="font-size:48px;font-weight:800;color:' +
+          (s.turnover_rate_pct > 15 ? '#C0392B' : s.turnover_rate_pct > 8 ? '#BA7517' : '#1D9E75') + '">' +
+          (s.turnover_rate_pct||0) + '%</div>' +
+        '<div style="color:var(--text-3)">Tỷ lệ turnover năm ' + year + '</div>' +
+        '</div>' +
+        buildStatRows([
+          ['Tổng nhân sự',  (s.total_employees||0) + ' người', '#3D35A8'],
+          ['Đang làm việc', (s.active_employees||0) + ' người', '#1D9E75'],
+          ['Đã nghỉ việc',  (s.resigned_count||0) + ' người', '#C0392B'],
+        ]);
+
+      const deptEl = document.getElementById('rp-turnover-dept');
+      const byDept = d.by_department || {};
+      if (Object.keys(byDept).length === 0) {
+        deptEl.innerHTML = '<p style="color:var(--text-3);text-align:center;padding:20px">Chưa có dữ liệu</p>';
+      } else {
+        const max = Math.max(...Object.values(byDept));
+        deptEl.innerHTML = Object.entries(byDept)
+          .sort((a, b) => b[1] - a[1])
+          .map(([dept, cnt]) => {
+            const pct = max > 0 ? Math.round((cnt/max)*100) : 0;
+            return '<div style="margin-bottom:12px">' +
+              '<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">' +
+              '<span>' + dept + '</span><strong>' + cnt + ' người</strong></div>' +
+              '<div style="background:#E0DDD8;border-radius:6px;height:8px">' +
+              '<div style="height:100%;background:#C0392B;border-radius:6px;width:' + pct + '%"></div>' +
+              '</div></div>';
+          }).join('');
+      }
+    })
+    .handleRequest({ action: 'GET_TURNOVER_REPORT', payload: { year } });
+}
+
+function loadAiInsights() {
+  const period = document.getElementById('rp-period').value;
+  const btn = document.getElementById('ai-insight-btn');
+  btn.textContent = '⌛ Đang phân tích...';
+  btn.disabled = true;
+
+  google.script.run
+    .withSuccessHandler(res => {
+      btn.textContent = '✨ AI Phân tích'; btn.disabled = false;
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      const d = res.data;
+      const panel = document.getElementById('rp-ai-panel');
+      panel.style.display = 'block';
+
+      const healthColors = { good: '#1D9E75', warning: '#BA7517', critical: '#C0392B' };
+      const healthLabels = { good: '✅ Tốt', warning: '⚠️ Cần chú ý', critical: '🔴 Cần can thiệp' };
+      const hEl = document.getElementById('rp-ai-health');
+      hEl.textContent = healthLabels[d.overall_health] || d.overall_health;
+      hEl.style.background = healthColors[d.overall_health] ? healthColors[d.overall_health] + '22' : '#eee';
+      hEl.style.color = healthColors[d.overall_health] || '#888';
+
+      document.getElementById('rp-ai-summary').textContent = d.summary || '';
+      document.getElementById('rp-ai-insights').innerHTML = (d.insights||[]).map(ins =>
+        '<div style="background:#F7F6F3;border-radius:10px;padding:14px">' +
+        '<div style="font-size:20px;margin-bottom:6px">' + (ins.icon||'💡') + '</div>' +
+        '<div style="font-weight:700;color:var(--text-1);margin-bottom:4px">' + esc(ins.title) + '</div>' +
+        '<div style="font-size:13px;color:var(--text-2);line-height:1.5">' + esc(ins.detail) + '</div>' +
+        '</div>'
+      ).join('');
+      showToast('AI đã hoàn tất phân tích ✨');
+    })
+    .handleRequest({ action: 'AI_PAYROLL_INSIGHTS', payload: { period } });
+}
+
+function esc(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>`;
+}
+
+// =============================================================================
+// MODULE 37 — SETUP GĐ 5 (chạy 1 lần)
+// =============================================================================
+
+/**
+ * Chạy hàm này để khởi tạo GĐ 5 (chạy SAU setupGiaiDoan4())
+ */
+function setupGiaiDoan5() {
+  Logger.log('🚀 Khởi tạo GĐ 5 — Payroll + Leave + Reports...');
+
+  setupPayrollSheet();
+  setupLeaveRequestsSheet();
+  setupAttendanceSheet();
+  setupLeaveBalanceSheet();
+
+  writeAuditLog('CREATE', 'SYSTEM', 'SETUP_GD5', '', '', 'v1.0', 'Khởi tạo Giai đoạn 5');
+  Logger.log('✅ GĐ 5 khởi tạo hoàn tất!');
+
+  try {
+    SpreadsheetApp.getUi().alert(
+      '✅ Giai đoạn 5 đã được khởi tạo!\n\n' +
+      'Đã tạo:\n• Sheet PAYROLL\n• Sheet LEAVE_REQUESTS\n• Sheet ATTENDANCE\n• Sheet LEAVE_BALANCE\n\n' +
+      'UI mới:\n• Tab "Bảng lương" — Tính lương, gửi payslip, xuất CSV\n' +
+      '• Tab "Nghỉ phép" — Đơn xin nghỉ, phê duyệt, theo dõi số dư\n' +
+      '• Tab "Báo cáo HR" — Monthly report + Turnover + AI insights\n\n' +
+      'Thêm vào nav sidebar (Hr_giaidoan2_ui.gs):\n' +
+      '  case "payroll": return getPayrollTabHtml();\n' +
+      '  case "leave":   return getLeaveTabHtml();\n' +
+      '  case "reports": return getReportsTabHtml();'
+    );
+  } catch (e) {}
+}
+
+/**
+ * Nav items để nhúng vào sidebar GĐ 2 (tham khảo)
+ * Thêm vào buildFullApp() trong Hr_giaidoan2_ui.gs:
+ *
+ *   case 'payroll':
+ *     contentHtml = getPayrollTabHtml(); break;
+ *   case 'leave':
+ *     contentHtml = getLeaveTabHtml(); break;
+ *   case 'reports':
+ *     contentHtml = getReportsTabHtml(); break;
+ *
+ * Nav items:
+ *   <a class="nav-item ${page==='payroll'?'active':''}" onclick="navigate('payroll')">💰 Bảng lương</a>
+ *   <a class="nav-item ${page==='leave'?'active':''}" onclick="navigate('leave')">🌴 Nghỉ phép</a>
+ *   <a class="nav-item ${page==='reports'?'active':''}" onclick="navigate('reports')">📊 Báo cáo</a>
+ */
