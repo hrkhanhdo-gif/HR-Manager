@@ -1,0 +1,2524 @@
+/**
+ * ══════════════════════════════════════════════════════════════════════════════
+ * HRIS - GIAI ĐOẠN 6: Mobile PWA + Integrations
+ * Module 27: Progressive Web App + Responsive Mobile UI
+ * Module 28: Google Calendar Sync + Google Forms Integration
+ * Module 29: Slack/Teams Webhook + Telegram Bot
+ * Module 30: Multi-language + Dark Mode + Activity Feed
+ * ══════════════════════════════════════════════════════════════════════════════
+ * CONVENTIONS:
+ *   - Function prefix: setup*, get*, create*, update*, delete*, run*, build*, send*
+ *   - Sheet names: UPPER_SNAKE_CASE
+ *   - Error handling: try/catch + writeAuditLog("ERROR", ...)
+ *   - No hard-coded API keys → PropertiesService
+ *   - hasPermission() check trước mọi action
+ * ══════════════════════════════════════════════════════════════════════════════
+ */
+
+// ─────────────────────────────────────────────────────────
+// MODULE 27: PROGRESSIVE WEB APP + RESPONSIVE MOBILE UI
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Trả về manifest.json dạng string để nhúng vào HTML
+ * (GAS không host static file, nên manifest được inline hoặc qua endpoint)
+ */
+function getPwaManifest() {
+  const deployUrl = getDeployUrl_();
+  return JSON.stringify({
+    name: 'HRIS - HR Manager',
+    short_name: 'HRIS',
+    description: 'Human Resource Information System',
+    start_url: deployUrl,
+    display: 'standalone',
+    background_color: '#F7F6F3',
+    theme_color: '#3D35A8',
+    orientation: 'portrait-primary',
+    icons: [
+      { src: 'https://www.gstatic.com/images/icons/material/system/2x/people_black_24dp.png', sizes: '192x192', type: 'image/png' },
+      { src: 'https://www.gstatic.com/images/icons/material/system/2x/people_black_48dp.png', sizes: '512x512', type: 'image/png' }
+    ],
+    categories: ['business', 'productivity'],
+    lang: 'vi'
+  });
+}
+
+/**
+ * Service Worker script dạng string để inject vào HTML (inline)
+ * GAS không host /sw.js, workaround: dùng Blob URL
+ */
+function getServiceWorkerScript() {
+  return `
+const CACHE_NAME = 'hris-v1';
+const STATIC_ASSETS = [];
+
+self.addEventListener('install', event => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
+    )
+  );
+  self.clients.claim();
+});
+
+self.addEventListener('fetch', event => {
+  if (event.request.method !== 'GET') return;
+  event.respondWith(
+    fetch(event.request)
+      .then(res => {
+        if (res && res.status === 200) {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+        }
+        return res;
+      })
+      .catch(() => caches.match(event.request))
+  );
+});
+`.trim();
+}
+
+/**
+ * Trả về CSS responsive đầy đủ cho mobile (inject vào HTML chính)
+ */
+function getMobileCss() {
+  return `
+/* ─── MOBILE RESPONSIVE (Module 27) ─── */
+@media (max-width: 900px) {
+  /* Sidebar ẩn, bottom tab bar hiển thị */
+  .sidebar {
+    display: none !important;
+  }
+  .main-content {
+    margin-left: 0 !important;
+    padding-bottom: 72px !important;
+  }
+  .topbar {
+    padding: 12px 16px !important;
+  }
+  .topbar h1 { font-size: 18px !important; }
+
+  /* Bottom Tab Bar */
+  .bottom-nav {
+    display: flex !important;
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    height: 64px;
+    background: #1A1A1A;
+    z-index: 500;
+    align-items: stretch;
+    border-top: 1px solid #333;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .bottom-nav-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    color: #888;
+    font-size: 10px;
+    font-family: 'Be Vietnam Pro', sans-serif;
+    cursor: pointer;
+    transition: color .15s;
+    border: none;
+    background: transparent;
+    padding: 0;
+    text-decoration: none;
+  }
+  .bottom-nav-item.active { color: #3D35A8; }
+  .bottom-nav-item svg, .bottom-nav-item .nav-icon { font-size: 22px; }
+
+  /* Metrics grid: 2 cột trên mobile */
+  .metrics-grid { grid-template-columns: 1fr 1fr !important; gap: 12px !important; }
+  .metric-card { padding: 14px 12px !important; }
+  .metric-value { font-size: 24px !important; }
+
+  /* Data table: horizontal scroll */
+  .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .data-table { min-width: 600px; }
+  .data-table th, .data-table td { padding: 10px 10px !important; font-size: 13px !important; }
+
+  /* Hide low-priority columns */
+  .data-table .col-secondary { display: none; }
+
+  /* Grid layouts */
+  .grid-2, .grid-3 { grid-template-columns: 1fr !important; }
+  .panel { padding: 16px !important; }
+
+  /* Modals full-screen */
+  .modal { 
+    width: 100% !important; max-width: 100% !important; 
+    margin: 0 !important; border-radius: 16px 16px 0 0 !important;
+    position: fixed; bottom: 0; left: 0; right: 0;
+    max-height: 90vh; overflow-y: auto;
+  }
+  .overlay { align-items: flex-end !important; }
+
+  /* Forms full-width */
+  .form-row { flex-direction: column !important; gap: 12px !important; }
+  .form-control { font-size: 16px !important; } /* prevent iOS zoom */
+
+  /* Action buttons stack */
+  .action-bar { flex-direction: column !important; gap: 10px !important; }
+  .btn { width: 100%; justify-content: center !important; }
+  .btn-sm { width: auto !important; }
+
+  /* AI Drawer full width on mobile */
+  .ai-drawer { width: 100% !important; }
+
+  /* Pipeline view scroll */
+  .pipeline { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* Charts shrink */
+  .chart-container { height: 200px !important; }
+
+  /* Topbar actions */
+  .topbar-actions { gap: 8px !important; }
+  .topbar-actions .btn-primary { padding: 8px 14px !important; font-size: 13px !important; }
+}
+
+/* Bottom nav hidden on desktop */
+.bottom-nav { display: none; }
+
+/* Touch-friendly tap targets */
+@media (max-width: 900px) {
+  button, .btn, [role="button"] { min-height: 44px; min-width: 44px; }
+  .nav-item { min-height: 44px !important; }
+  select, input, textarea { min-height: 44px; }
+}
+
+/* PWA install banner */
+.pwa-install-banner {
+  position: fixed; bottom: 80px; left: 16px; right: 16px;
+  background: #3D35A8; color: white;
+  border-radius: 12px; padding: 14px 16px;
+  display: flex; align-items: center; gap: 12px;
+  box-shadow: 0 8px 24px rgba(61,53,168,.35);
+  z-index: 600; font-family: 'Be Vietnam Pro', sans-serif;
+  transition: transform .3s, opacity .3s;
+}
+.pwa-install-banner.hidden { transform: translateY(120%); opacity: 0; pointer-events: none; }
+.pwa-install-banner-text { flex: 1; font-size: 14px; }
+.pwa-install-banner-text strong { display: block; font-size: 15px; margin-bottom: 2px; }
+.pwa-install-btn { background: white; color: #3D35A8; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.pwa-dismiss-btn { background: transparent; border: none; color: rgba(255,255,255,.7); cursor: pointer; font-size: 20px; padding: 4px; }
+
+/* Dark Mode (Module 30) */
+html.dark-mode {
+  --bg: #0F0F0F;
+  --surface: #1A1A1A;
+  --surface-2: #252525;
+  --text-1: #F0EFEC;
+  --text-2: #A8A7A0;
+  --text-3: #666660;
+  --border: rgba(255,255,255,0.08);
+  --accent: #6B62E8;
+  --accent-l: #2A2660;
+}
+html.dark-mode .sidebar { background: #0A0A0A; border-right: 1px solid var(--border); }
+html.dark-mode .topbar { background: var(--surface); border-bottom: 1px solid var(--border); }
+html.dark-mode .panel, html.dark-mode .metric-card { background: var(--surface); border-color: var(--border); }
+html.dark-mode .data-table th { background: var(--surface-2); color: var(--text-2); }
+html.dark-mode .data-table tr:hover { background: var(--surface-2); }
+html.dark-mode .modal { background: var(--surface); }
+html.dark-mode .form-control { background: var(--surface-2); border-color: var(--border); color: var(--text-1); }
+html.dark-mode .bottom-nav { background: #0A0A0A; border-top-color: var(--border); }
+`.trim();
+}
+
+/**
+ * HTML snippet cho Bottom Tab Bar và PWA install banner
+ * Paste vào cuối <body> của HTML chính
+ */
+function getBottomNavHtml() {
+  return `
+<!-- Bottom Tab Bar (Module 27, Mobile) -->
+<nav class="bottom-nav" id="bottomNav">
+  <button class="bottom-nav-item active" data-page="dashboard" onclick="showPage('dashboard');setBottomActive(this)">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+    <span>Tổng quan</span>
+  </button>
+  <button class="bottom-nav-item" data-page="nhansu" onclick="showPage('nhansu');setBottomActive(this)">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+    <span>Nhân sự</span>
+  </button>
+  <button class="bottom-nav-item" data-page="ungvien" onclick="showPage('ungvien');setBottomActive(this)">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M20 6h-2.18c.07-.44.18-.88.18-1.36C18 2.53 16.5 1 14.64 1 13.11 1 12.12 1.9 11.5 3.02L11 4l-.5-1.02C9.87 1.9 8.89 1 7.36 1 5.5 1 4 2.53 4 4.64c0 .48.11.92.18 1.36H2c-1.1 0-1.99.9-1.99 2L0 19c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2z"/></svg>
+    <span>Tuyển dụng</span>
+  </button>
+  <button class="bottom-nav-item" data-page="kpi" onclick="showPage('kpi');setBottomActive(this)">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
+    <span>KPI</span>
+  </button>
+  <button class="bottom-nav-item" data-page="ai" onclick="toggleAiDrawer();setBottomActive(this)">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
+    <span>AI</span>
+  </button>
+</nav>
+
+<!-- PWA Install Banner -->
+<div class="pwa-install-banner hidden" id="pwaInstallBanner">
+  <div class="pwa-install-banner-text">
+    <strong>Cài HRIS về máy</strong>
+    Truy cập nhanh, dùng offline
+  </div>
+  <button class="pwa-install-btn" onclick="triggerPwaInstall()">Cài ngay</button>
+  <button class="pwa-dismiss-btn" onclick="dismissPwaBanner()">✕</button>
+</div>
+
+<!-- Dark Mode Toggle Button (topbar) -->
+<button id="darkModeToggle" class="btn btn-ghost btn-sm" onclick="toggleDarkMode()" 
+  title="Chuyển chế độ tối/sáng" style="font-size:18px; padding:6px 10px;">🌙</button>
+`.trim();
+}
+
+/**
+ * JavaScript cho PWA + Mobile (inject vào script section của HTML)
+ */
+function getPwaJs() {
+  return `
+// ─── PWA + Mobile JS (Module 27) ───
+
+let _pwaInstallPrompt = null;
+
+function initPwa() {
+  // Service Worker via Blob (workaround vì GAS không host file tĩnh)
+  if ('serviceWorker' in navigator) {
+    const swCode = ${JSON.stringify(getServiceWorkerScript())};
+    const blob = new Blob([swCode], { type: 'application/javascript' });
+    const swUrl = URL.createObjectURL(blob);
+    navigator.serviceWorker.register(swUrl)
+      .then(reg => console.log('SW registered:', reg.scope))
+      .catch(err => console.log('SW error:', err));
+  }
+
+  // PWA install prompt
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    _pwaInstallPrompt = e;
+    const banner = document.getElementById('pwaInstallBanner');
+    if (banner && !localStorage.getItem('pwa_dismissed')) {
+      setTimeout(() => banner.classList.remove('hidden'), 3000);
+    }
+  });
+
+  window.addEventListener('appinstalled', () => {
+    document.getElementById('pwaInstallBanner')?.classList.add('hidden');
+    showToast('✅ HRIS đã được cài đặt!', 'success');
+  });
+
+  // Manifest meta tags
+  const meta = document.createElement('meta');
+  meta.name = 'theme-color'; meta.content = '#3D35A8';
+  document.head.appendChild(meta);
+  const appMeta = document.createElement('meta');
+  appMeta.name = 'apple-mobile-web-app-capable'; appMeta.content = 'yes';
+  document.head.appendChild(appMeta);
+  const statusMeta = document.createElement('meta');
+  statusMeta.name = 'apple-mobile-web-app-status-bar-style'; statusMeta.content = 'black-translucent';
+  document.head.appendChild(statusMeta);
+}
+
+function triggerPwaInstall() {
+  if (_pwaInstallPrompt) {
+    _pwaInstallPrompt.prompt();
+    _pwaInstallPrompt.userChoice.then(choice => {
+      if (choice.outcome === 'accepted') showToast('✅ Đang cài HRIS...', 'success');
+      _pwaInstallPrompt = null;
+    });
+  }
+}
+
+function dismissPwaBanner() {
+  document.getElementById('pwaInstallBanner')?.classList.add('hidden');
+  localStorage.setItem('pwa_dismissed', '1');
+}
+
+function setBottomActive(el) {
+  document.querySelectorAll('.bottom-nav-item').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+}
+
+// Init khi DOM sẵn sàng
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initPwa);
+} else {
+  initPwa();
+}
+`.trim();
+}
+
+
+// ─────────────────────────────────────────────────────────
+// MODULE 28: GOOGLE CALENDAR SYNC
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Tạo event phỏng vấn trên Google Calendar
+ * @param {Object} pvData - Dữ liệu từ sheet PHONG_VAN
+ */
+function createCalendarEventPhongVan(pvData) {
+  try {
+    const calendarId = getConfig_('CALENDAR_ID') || 'primary';
+    const calendar = CalendarApp.getCalendarById(calendarId) || CalendarApp.getDefaultCalendar();
+
+    const [h, m] = (pvData.Gio_PV || '09:00').split(':').map(Number);
+    const startDate = new Date(pvData.Ngay_PV);
+    startDate.setHours(h, m, 0, 0);
+    const endDate = new Date(startDate.getTime() + 60 * 60 * 1000); // 1 giờ
+
+    const title = `[PV] ${pvData.Ho_Ten_UV} — ${pvData.Vi_Tri_Tuyen || 'Vị trí ứng tuyển'}`;
+    const desc = [
+      `Ứng viên: ${pvData.Ho_Ten_UV}`,
+      `Vị trí: ${pvData.Vi_Tri_Tuyen || '—'}`,
+      `Hình thức: ${pvData.Hinh_Thuc || 'Trực tiếp'}`,
+      `Người phỏng vấn: ${pvData.Nguoi_PV || '—'}`,
+      `ID Phỏng vấn: ${pvData.ID_PV}`,
+      '',
+      'Tạo tự động bởi HRIS'
+    ].join('\n');
+
+    const options = {
+      description: desc,
+      location: pvData.Hinh_Thuc === 'Online' ? 'Google Meet / Zoom' : 'Văn phòng',
+    };
+
+    // Thêm guests nếu có email
+    if (pvData.Email_UV) options.guests = pvData.Email_UV;
+
+    const event = calendar.createEvent(title, startDate, endDate, options);
+
+    writeAuditLog_(
+      Session.getActiveUser().getEmail(),
+      getUserRole_(Session.getActiveUser().getEmail()),
+      'CREATE',
+      'CALENDAR_EVENT',
+      pvData.ID_PV,
+      'event_id',
+      '',
+      event.getId(),
+      'Tạo event phỏng vấn'
+    );
+
+    return { success: true, eventId: event.getId(), eventUrl: event.getEventSeriesId() };
+  } catch (e) {
+    Logger.log('createCalendarEventPhongVan error: ' + e.message);
+    writeAuditLog_('SYSTEM', 'SYSTEM', 'ERROR', 'CALENDAR', pvData.ID_PV || '', '', '', '', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Tạo event sinh nhật hàng năm (recurring) cho nhân viên
+ * @param {Object} nsData - { ID_NhanSu, Ho_Ten, Ngay_Sinh, Email }
+ */
+function createCalendarEventSinhNhat(nsData) {
+  try {
+    const calendar = CalendarApp.getDefaultCalendar();
+    const dob = new Date(nsData.Ngay_Sinh);
+    const thisYear = new Date().getFullYear();
+
+    // Tạo event cho năm hiện tại
+    const eventDate = new Date(thisYear, dob.getMonth(), dob.getDate());
+    eventDate.setHours(8, 0, 0, 0);
+    const eventEnd = new Date(eventDate.getTime() + 30 * 60 * 1000);
+
+    const title = `🎂 Sinh nhật: ${nsData.Ho_Ten}`;
+    const desc = `Nhân viên: ${nsData.Ho_Ten}\nBộ phận: ${nsData.Bo_Phan || '—'}\nTạo tự động bởi HRIS`;
+
+    // Kiểm tra xem đã có event chưa để tránh duplicate
+    const existing = calendar.getEvents(
+      new Date(thisYear, dob.getMonth(), dob.getDate(), 0, 0),
+      new Date(thisYear, dob.getMonth(), dob.getDate(), 23, 59),
+      { search: nsData.Ho_Ten }
+    );
+    if (existing.length > 0) {
+      return { success: true, skipped: true, reason: 'Event đã tồn tại' };
+    }
+
+    const event = calendar.createAllDayEvent(title, new Date(thisYear, dob.getMonth(), dob.getDate()), { description: desc });
+    return { success: true, eventId: event.getId() };
+  } catch (e) {
+    Logger.log('createCalendarEventSinhNhat error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Tạo event deadline Onboarding Task
+ * @param {Object} taskData - { ID_Task, Task_Name, Deadline, ID_NhanSu, Ho_Ten }
+ */
+function createCalendarEventOnboarding(taskData) {
+  try {
+    const calendar = CalendarApp.getDefaultCalendar();
+    const deadline = new Date(taskData.Deadline);
+    deadline.setHours(9, 0, 0, 0);
+    const end = new Date(deadline.getTime() + 30 * 60 * 1000);
+
+    const title = `[Onboarding] ${taskData.Task_Name} — ${taskData.Ho_Ten}`;
+    const desc = [
+      `Task: ${taskData.Task_Name}`,
+      `Nhân viên mới: ${taskData.Ho_Ten}`,
+      `ID Task: ${taskData.ID_Task}`,
+      `Category: ${taskData.Category || '—'}`,
+      '',
+      'Tạo tự động bởi HRIS'
+    ].join('\n');
+
+    const event = calendar.createEvent(title, deadline, end, { description: desc });
+    return { success: true, eventId: event.getId() };
+  } catch (e) {
+    Logger.log('createCalendarEventOnboarding error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Bulk tạo event sinh nhật cho tất cả nhân viên đang hoạt động
+ * Chạy thủ công 1 lần/năm hoặc qua trigger đầu năm
+ */
+function runBulkBirthdayCalendarSync() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('NHAN_SU');
+    if (!sheet) throw new Error('Sheet NHAN_SU không tồn tại');
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const colIdx = (name) => headers.indexOf(name);
+
+    let created = 0, skipped = 0, errors = 0;
+
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const status = row[colIdx('Trang_Thai')];
+      if (status === 'Đã nghỉ') continue;
+
+      const ngaySinh = row[colIdx('Ngay_Sinh')];
+      if (!ngaySinh) continue;
+
+      const result = createCalendarEventSinhNhat({
+        ID_NhanSu: row[colIdx('ID_NhanSu')],
+        Ho_Ten: row[colIdx('Ho_Ten')],
+        Ngay_Sinh: ngaySinh,
+        Bo_Phan: row[colIdx('Bo_Phan')]
+      });
+
+      if (result.success && !result.skipped) created++;
+      else if (result.skipped) skipped++;
+      else errors++;
+
+      Utilities.sleep(200); // Tránh quota
+    }
+
+    Logger.log(`Bulk birthday sync: created=${created}, skipped=${skipped}, errors=${errors}`);
+    return { success: true, created, skipped, errors };
+  } catch (e) {
+    Logger.log('runBulkBirthdayCalendarSync error: ' + e.message);
+    writeAuditLog_('SYSTEM', 'SYSTEM', 'ERROR', 'CALENDAR', 'BULK_BIRTHDAY', '', '', '', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// MODULE 28: GOOGLE FORMS INTEGRATION
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Setup Google Form xin nghỉ phép tự động
+ * Tạo form, lưu form ID vào PropertiesService
+ * Chạy 1 lần khi setup GĐ6
+ */
+function setupLeaveRequestForm() {
+  try {
+    const form = FormApp.create('HRIS — Đơn xin nghỉ phép');
+    form.setDescription('Điền đầy đủ thông tin để gửi đơn xin phép. HR sẽ phê duyệt trong 24h.');
+    form.setCollectEmail(true);
+    form.setLimitOneResponsePerUser(false);
+    form.setShowLinkToRespondAgain(true);
+
+    // Q1: Mã nhân viên
+    form.addTextItem()
+      .setTitle('Mã nhân viên (ID_NhanSu)')
+      .setHelpText('Ví dụ: NS-20240101-0001')
+      .setRequired(true);
+
+    // Q2: Loại nghỉ
+    form.addMultipleChoiceItem()
+      .setTitle('Loại nghỉ phép')
+      .setChoiceValues(['Nghỉ phép năm (Annual)', 'Nghỉ bệnh (Sick)', 'Nghỉ không lương (Unpaid)', 'Nghỉ thai sản (Maternity)', 'Nghỉ việc riêng'])
+      .setRequired(true);
+
+    // Q3: Ngày bắt đầu
+    form.addDateItem()
+      .setTitle('Ngày bắt đầu nghỉ')
+      .setRequired(true);
+
+    // Q4: Ngày kết thúc
+    form.addDateItem()
+      .setTitle('Ngày kết thúc nghỉ')
+      .setRequired(true);
+
+    // Q5: Lý do
+    form.addParagraphTextItem()
+      .setTitle('Lý do nghỉ phép')
+      .setRequired(false);
+
+    // Q6: Người bàn giao công việc
+    form.addTextItem()
+      .setTitle('Người bàn giao công việc (nếu có)')
+      .setRequired(false);
+
+    // Lưu form ID
+    PropertiesService.getScriptProperties().setProperty('LEAVE_FORM_ID', form.getId());
+    PropertiesService.getScriptProperties().setProperty('LEAVE_FORM_URL', form.getPublishedUrl());
+
+    // Tạo trigger khi form được submit
+    ScriptApp.newTrigger('onLeaveFormSubmit')
+      .forForm(form)
+      .onFormSubmit()
+      .create();
+
+    Logger.log('Leave Form URL: ' + form.getPublishedUrl());
+    return {
+      success: true,
+      formId: form.getId(),
+      formUrl: form.getPublishedUrl(),
+      editUrl: form.getEditUrl()
+    };
+  } catch (e) {
+    Logger.log('setupLeaveRequestForm error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Trigger handler khi form xin nghỉ phép được submit
+ * @param {Object} e - FormSubmit event
+ */
+function onLeaveFormSubmit(e) {
+  try {
+    const responses = e.response.getItemResponses();
+    const email = e.response.getRespondentEmail();
+
+    // Parse responses theo thứ tự field
+    const idNhanSu   = responses[0]?.getResponse() || '';
+    const leaveType  = responses[1]?.getResponse() || '';
+    const fromDate   = responses[2]?.getResponse() || '';
+    const toDate     = responses[3]?.getResponse() || '';
+    const reason     = responses[4]?.getResponse() || '';
+    const handover   = responses[5]?.getResponse() || '';
+
+    if (!idNhanSu || !leaveType || !fromDate || !toDate) {
+      Logger.log('onLeaveFormSubmit: thiếu dữ liệu bắt buộc');
+      return;
+    }
+
+    // Parse leave type
+    const leaveTypeMap = {
+      'Nghỉ phép năm (Annual)': 'Annual',
+      'Nghỉ bệnh (Sick)': 'Sick',
+      'Nghỉ không lương (Unpaid)': 'Unpaid',
+      'Nghỉ thai sản (Maternity)': 'Maternity',
+      'Nghỉ việc riêng': 'Other'
+    };
+
+    // Lưu vào sheet LEAVE_REQUESTS
+    const result = createLeaveRequest_({
+      ID_NhanSu: idNhanSu,
+      Email_NhanSu: email,
+      Leave_Type: leaveTypeMap[leaveType] || 'Other',
+      From_Date: fromDate,
+      To_Date: toDate,
+      Reason: reason + (handover ? '\nBàn giao: ' + handover : ''),
+      Status: 'Pending'
+    });
+
+    if (result.success) {
+      // Gửi email xác nhận cho nhân viên
+      sendLeaveConfirmationEmail_(email, idNhanSu, leaveType, fromDate, toDate, result.leaveId);
+      // Gửi email yêu cầu duyệt cho HR/Manager
+      sendLeaveApprovalRequestEmail_(result.leaveId, idNhanSu, leaveType, fromDate, toDate, reason);
+      // Thông báo Slack (nếu đã cấu hình)
+      sendSlackMessage_(`📋 *Đơn nghỉ phép mới*\nNhân viên: ${idNhanSu}\nLoại: ${leaveType}\nTừ: ${fromDate} → ${toDate}\nLý do: ${reason || '—'}`, 'hr-notifications');
+    }
+  } catch (e) {
+    Logger.log('onLeaveFormSubmit error: ' + e.message);
+    writeAuditLog_('FORM', 'SYSTEM', 'ERROR', 'LEAVE_REQUESTS', '', '', '', '', e.message);
+  }
+}
+
+/**
+ * Tạo bản ghi leave request trong sheet
+ */
+function createLeaveRequest_(data) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName('LEAVE_REQUESTS');
+    if (!sheet) {
+      sheet = ss.insertSheet('LEAVE_REQUESTS');
+      sheet.appendRow(['ID_Leave', 'ID_NhanSu', 'Email_NhanSu', 'Leave_Type', 'From_Date', 'To_Date', 'Days', 'Reason', 'Approver', 'Status', 'Approved_At', 'Created_At']);
+    }
+
+    const now = new Date();
+    const leaveId = 'LV-' + Utilities.formatDate(now, 'Asia/Ho_Chi_Minh', 'yyyyMMdd') + '-' + String(sheet.getLastRow()).padStart(4, '0');
+
+    const from = new Date(data.From_Date);
+    const to = new Date(data.To_Date);
+    const days = Math.max(1, Math.round((to - from) / (1000 * 60 * 60 * 24)) + 1);
+
+    sheet.appendRow([
+      leaveId,
+      data.ID_NhanSu,
+      data.Email_NhanSu || '',
+      data.Leave_Type,
+      data.From_Date,
+      data.To_Date,
+      days,
+      data.Reason || '',
+      '', // Approver (chưa có)
+      'Pending',
+      '', // Approved_At
+      Utilities.formatDate(now, 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy HH:mm:ss')
+    ]);
+
+    writeAuditLog_(data.Email_NhanSu || 'FORM', 'EMPLOYEE', 'CREATE', 'LEAVE_REQUESTS', leaveId, 'Status', '', 'Pending', 'Đơn xin nghỉ phép qua Form');
+    return { success: true, leaveId, days };
+  } catch (e) {
+    Logger.log('createLeaveRequest_ error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Duyệt/Từ chối đơn nghỉ phép (gọi từ email link hoặc UI)
+ * @param {string} leaveId
+ * @param {string} action - 'Approved' | 'Rejected'
+ * @param {string} approverEmail
+ */
+function approveLeaveRequest(leaveId, action, approverEmail) {
+  try {
+    if (!hasPermission_(approverEmail, ['ADMIN', 'HR', 'MANAGER'])) {
+      return { success: false, error: 'Không có quyền phê duyệt' };
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('LEAVE_REQUESTS');
+    if (!sheet) return { success: false, error: 'Sheet LEAVE_REQUESTS không tồn tại' };
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const colId = headers.indexOf('ID_Leave');
+    const colStatus = headers.indexOf('Status');
+    const colApprover = headers.indexOf('Approver');
+    const colApprovedAt = headers.indexOf('Approved_At');
+    const colEmployee = headers.indexOf('Email_NhanSu');
+
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][colId] === leaveId) {
+        if (data[i][colStatus] !== 'Pending') {
+          return { success: false, error: 'Đơn đã được xử lý rồi' };
+        }
+        const now = new Date();
+        sheet.getRange(i + 1, colStatus + 1).setValue(action);
+        sheet.getRange(i + 1, colApprover + 1).setValue(approverEmail);
+        sheet.getRange(i + 1, colApprovedAt + 1).setValue(Utilities.formatDate(now, 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy HH:mm:ss'));
+
+        // Gửi email kết quả
+        const employeeEmail = data[i][colEmployee];
+        if (employeeEmail) {
+          const actionText = action === 'Approved' ? '✅ đã được PHÊ DUYỆT' : '❌ đã bị TỪ CHỐI';
+          MailApp.sendEmail({
+            to: employeeEmail,
+            subject: `[HRIS] Đơn nghỉ phép ${actionText}`,
+            htmlBody: buildLeaveResultEmailHtml_(leaveId, action, approverEmail, data[i])
+          });
+        }
+
+        // Slack notification
+        const slackMsg = action === 'Approved'
+          ? `✅ Đơn nghỉ phép *${leaveId}* đã được phê duyệt bởi ${approverEmail}`
+          : `❌ Đơn nghỉ phép *${leaveId}* bị từ chối bởi ${approverEmail}`;
+        sendSlackMessage_(slackMsg, 'hr-notifications');
+
+        writeAuditLog_(approverEmail, getUserRole_(approverEmail), 'UPDATE', 'LEAVE_REQUESTS', leaveId, 'Status', 'Pending', action, '');
+        return { success: true, leaveId, action };
+      }
+    }
+    return { success: false, error: 'Không tìm thấy đơn nghỉ phép: ' + leaveId };
+  } catch (e) {
+    Logger.log('approveLeaveRequest error: ' + e.message);
+    writeAuditLog_(approverEmail, '', 'ERROR', 'LEAVE_REQUESTS', leaveId, '', '', '', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Tạo Google Form chấm công (check-in/check-out)
+ */
+function setupAttendanceForm() {
+  try {
+    const form = FormApp.create('HRIS — Chấm công');
+    form.setDescription('Điền mã nhân viên để ghi nhận giờ vào/ra.');
+    form.setCollectEmail(true);
+
+    form.addTextItem()
+      .setTitle('Mã nhân viên (ID_NhanSu)')
+      .setRequired(true);
+
+    form.addMultipleChoiceItem()
+      .setTitle('Loại chấm công')
+      .setChoiceValues(['Check-in (Vào làm)', 'Check-out (Ra về)', 'Check-in muộn', 'Check-out sớm', 'Làm thêm giờ'])
+      .setRequired(true);
+
+    form.addTextItem()
+      .setTitle('Ghi chú (nếu có)')
+      .setRequired(false);
+
+    PropertiesService.getScriptProperties().setProperty('ATTENDANCE_FORM_ID', form.getId());
+    PropertiesService.getScriptProperties().setProperty('ATTENDANCE_FORM_URL', form.getPublishedUrl());
+
+    ScriptApp.newTrigger('onAttendanceFormSubmit')
+      .forForm(form)
+      .onFormSubmit()
+      .create();
+
+    return { success: true, formId: form.getId(), formUrl: form.getPublishedUrl() };
+  } catch (e) {
+    Logger.log('setupAttendanceForm error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Trigger handler chấm công
+ */
+function onAttendanceFormSubmit(e) {
+  try {
+    const responses = e.response.getItemResponses();
+    const email = e.response.getRespondentEmail();
+    const idNhanSu = responses[0]?.getResponse() || '';
+    const checkType = responses[1]?.getResponse() || '';
+    const note = responses[2]?.getResponse() || '';
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName('ATTENDANCE');
+    if (!sheet) {
+      sheet = ss.insertSheet('ATTENDANCE');
+      sheet.appendRow(['ID_Attendance', 'ID_NhanSu', 'Email', 'Check_Type', 'Timestamp', 'Note']);
+    }
+
+    const now = new Date();
+    const attId = 'AT-' + Utilities.formatDate(now, 'Asia/Ho_Chi_Minh', 'yyyyMMdd-HHmm') + '-' + String(Math.floor(Math.random() * 1000)).padStart(3, '0');
+
+    sheet.appendRow([
+      attId, idNhanSu, email, checkType,
+      Utilities.formatDate(now, 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy HH:mm:ss'),
+      note
+    ]);
+
+    Logger.log('Attendance recorded: ' + attId + ' | ' + idNhanSu + ' | ' + checkType);
+  } catch (e) {
+    Logger.log('onAttendanceFormSubmit error: ' + e.message);
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// MODULE 29: SLACK / TEAMS WEBHOOK
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Lưu Slack Webhook URL vào PropertiesService
+ * @param {string} webhookUrl - Incoming Webhook URL từ Slack
+ */
+function setSlackWebhook(webhookUrl) {
+  PropertiesService.getScriptProperties().setProperty('SLACK_WEBHOOK_URL', webhookUrl);
+  Logger.log('Slack webhook đã được lưu.');
+  return { success: true };
+}
+
+/**
+ * Lưu Teams Webhook URL
+ * @param {string} webhookUrl
+ */
+function setTeamsWebhook(webhookUrl) {
+  PropertiesService.getScriptProperties().setProperty('TEAMS_WEBHOOK_URL', webhookUrl);
+  Logger.log('Teams webhook đã được lưu.');
+  return { success: true };
+}
+
+/**
+ * Gửi message đến Slack channel
+ * @param {string} text - Nội dung message (Slack markdown)
+ * @param {string} channel - Channel name (optional, nếu webhook cố định channel)
+ * @param {Object[]} [attachments] - Slack attachments/blocks (optional)
+ */
+function sendSlackMessage_(text, channel, attachments) {
+  try {
+    const webhookUrl = PropertiesService.getScriptProperties().getProperty('SLACK_WEBHOOK_URL');
+    if (!webhookUrl) {
+      Logger.log('sendSlackMessage_: SLACK_WEBHOOK_URL chưa được cấu hình');
+      return { success: false, error: 'Chưa cấu hình Slack webhook' };
+    }
+
+    const payload = { text };
+    if (channel) payload.channel = '#' + channel.replace('#', '');
+    if (attachments && attachments.length > 0) payload.attachments = attachments;
+
+    const response = UrlFetchApp.fetch(webhookUrl, {
+      method: 'POST',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    if (response.getResponseCode() !== 200) {
+      Logger.log('Slack error: ' + response.getContentText());
+      return { success: false, error: response.getContentText() };
+    }
+    return { success: true };
+  } catch (e) {
+    Logger.log('sendSlackMessage_ error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Gửi rich message với Slack Block Kit
+ * @param {Object[]} blocks - Slack blocks array
+ * @param {string} [fallbackText]
+ */
+function sendSlackBlocks_(blocks, fallbackText) {
+  try {
+    const webhookUrl = PropertiesService.getScriptProperties().getProperty('SLACK_WEBHOOK_URL');
+    if (!webhookUrl) return { success: false, error: 'Chưa cấu hình Slack webhook' };
+
+    const payload = {
+      text: fallbackText || 'HRIS Notification',
+      blocks: blocks
+    };
+
+    const response = UrlFetchApp.fetch(webhookUrl, {
+      method: 'POST',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    return { success: response.getResponseCode() === 200 };
+  } catch (e) {
+    Logger.log('sendSlackBlocks_ error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Gửi thông báo nhân viên mới lên Slack
+ * @param {Object} nsData - { Ho_Ten, Bo_Phan, Chuc_Vu, Ngay_Vao, ID_NhanSu }
+ */
+function sendSlackNewEmployee(nsData) {
+  const blocks = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: '👋 Chào mừng nhân viên mới!', emoji: true }
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Họ tên:*\n${nsData.Ho_Ten}` },
+        { type: 'mrkdwn', text: `*Bộ phận:*\n${nsData.Bo_Phan || '—'}` },
+        { type: 'mrkdwn', text: `*Chức vụ:*\n${nsData.Chuc_Vu || '—'}` },
+        { type: 'mrkdwn', text: `*Ngày vào:*\n${nsData.Ngay_Vao || '—'}` }
+      ]
+    },
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `ID: ${nsData.ID_NhanSu} | Tự động từ HRIS` }]
+    }
+  ];
+  return sendSlackBlocks_(blocks, `Nhân viên mới: ${nsData.Ho_Ten} — ${nsData.Bo_Phan}`);
+}
+
+/**
+ * Gửi thông báo ứng viên được Offer lên Slack
+ */
+function sendSlackOfferAlert(uvData) {
+  const blocks = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: '🎉 Offer Accepted!', emoji: true }
+    },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `Ứng viên *${uvData.Ho_Ten}* đã nhận offer cho vị trí *${uvData.Vi_Tri_Tuyen}*` }
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Nguồn CV:*\n${uvData.Nguon_CV || '—'}` },
+        { type: 'mrkdwn', text: `*Trạng thái:*\nOffer` }
+      ]
+    }
+  ];
+  return sendSlackBlocks_(blocks, `Offer: ${uvData.Ho_Ten} — ${uvData.Vi_Tri_Tuyen}`);
+}
+
+/**
+ * Gửi thông báo lịch phỏng vấn ngày mai lên Slack
+ * Chạy qua trigger mỗi tối 20:00
+ */
+function runSlackInterviewReminder() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('PHONG_VAN');
+    if (!sheet) return;
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const colNgay = headers.indexOf('Ngay_PV');
+    const colGio = headers.indexOf('Gio_PV');
+    const colUV = headers.indexOf('Ho_Ten_UV');
+    const colNguoiPV = headers.indexOf('Nguoi_PV');
+    const colHinhThuc = headers.indexOf('Hinh_Thuc');
+    const colKetQua = headers.indexOf('Ket_Qua');
+
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = Utilities.formatDate(tomorrow, 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy');
+
+    const interviews = [];
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const ngayPv = row[colNgay];
+      if (!ngayPv) continue;
+      const ngayPvStr = Utilities.formatDate(new Date(ngayPv), 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy');
+      if (ngayPvStr === tomorrowStr && row[colKetQua] === 'Chờ kết quả') {
+        interviews.push({
+          Ho_Ten_UV: row[colUV],
+          Gio_PV: row[colGio],
+          Nguoi_PV: row[colNguoiPV],
+          Hinh_Thuc: row[colHinhThuc]
+        });
+      }
+    }
+
+    if (interviews.length === 0) return;
+
+    let listText = interviews.map(iv =>
+      `• *${iv.Ho_Ten_UV}* — ${iv.Gio_PV || '?'} | ${iv.Hinh_Thuc || 'Trực tiếp'} | Người PV: ${iv.Nguoi_PV || '—'}`
+    ).join('\n');
+
+    const blocks = [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: `📅 ${interviews.length} lịch phỏng vấn ngày mai`, emoji: true }
+      },
+      { type: 'section', text: { type: 'mrkdwn', text: listText } },
+      {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: `Nhắc tự động từ HRIS — ${tomorrowStr}` }]
+      }
+    ];
+    sendSlackBlocks_(blocks, `${interviews.length} phỏng vấn ngày mai (${tomorrowStr})`);
+  } catch (e) {
+    Logger.log('runSlackInterviewReminder error: ' + e.message);
+  }
+}
+
+/**
+ * Gửi alert turnover risk lên Slack (kết hợp với Module 18)
+ * @param {Object[]} riskList - Danh sách nhân sự có nguy cơ nghỉ
+ */
+function sendSlackTurnoverAlert(riskList) {
+  if (!riskList || riskList.length === 0) return;
+
+  const listText = riskList.slice(0, 5).map(r =>
+    `• *${r.Ho_Ten}* (${r.Bo_Phan}) — ${r.Thang_Lam_Viec} tháng, chưa thăng tiến`
+  ).join('\n');
+
+  const blocks = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `⚠️ Cảnh báo Turnover Risk — ${riskList.length} nhân sự`, emoji: true }
+    },
+    { type: 'section', text: { type: 'mrkdwn', text: listText + (riskList.length > 5 ? `\n_...và ${riskList.length - 5} người khác_` : '') } },
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: 'Phân tích tự động bởi HRIS AI Engine' }]
+    }
+  ];
+  sendSlackBlocks_(blocks, `Turnover Risk: ${riskList.length} nhân sự cần chú ý`);
+}
+
+/**
+ * Gửi message đến Microsoft Teams qua Incoming Webhook
+ * @param {string} title
+ * @param {string} text
+ * @param {string} [color] - hex color cho thematic color
+ */
+function sendTeamsMessage_(title, text, color) {
+  try {
+    const webhookUrl = PropertiesService.getScriptProperties().getProperty('TEAMS_WEBHOOK_URL');
+    if (!webhookUrl) {
+      Logger.log('sendTeamsMessage_: TEAMS_WEBHOOK_URL chưa cấu hình');
+      return { success: false, error: 'Chưa cấu hình Teams webhook' };
+    }
+
+    const payload = {
+      '@type': 'MessageCard',
+      '@context': 'http://schema.org/extensions',
+      themeColor: color || '3D35A8',
+      summary: title,
+      sections: [{
+        activityTitle: title,
+        activitySubtitle: 'HRIS — HR Manager System',
+        activityText: text,
+        markdown: true
+      }]
+    };
+
+    const response = UrlFetchApp.fetch(webhookUrl, {
+      method: 'POST',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    return { success: response.getResponseCode() === 200 };
+  } catch (e) {
+    Logger.log('sendTeamsMessage_ error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// MODULE 29: TELEGRAM BOT
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Lưu Telegram Bot Token và Chat ID
+ * @param {string} botToken - Từ @BotFather
+ * @param {string} chatId - Chat ID của group HR hoặc admin user
+ */
+function setTelegramConfig(botToken, chatId) {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('TELEGRAM_BOT_TOKEN', botToken);
+  props.setProperty('TELEGRAM_CHAT_ID', chatId);
+  Logger.log('Telegram config đã được lưu.');
+  return { success: true };
+}
+
+/**
+ * Gửi message đến Telegram
+ * @param {string} text - Nội dung (HTML format)
+ * @param {string} [chatId] - Override chat ID nếu cần
+ * @param {Object} [keyboard] - Inline keyboard markup (optional)
+ */
+function sendTelegramMessage_(text, chatId, keyboard) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const token = props.getProperty('TELEGRAM_BOT_TOKEN');
+    const defaultChatId = props.getProperty('TELEGRAM_CHAT_ID');
+    const targetChatId = chatId || defaultChatId;
+
+    if (!token || !targetChatId) {
+      Logger.log('sendTelegramMessage_: Telegram chưa cấu hình');
+      return { success: false, error: 'Chưa cấu hình Telegram' };
+    }
+
+    const payload = {
+      chat_id: targetChatId,
+      text: text,
+      parse_mode: 'HTML'
+    };
+    if (keyboard) payload.reply_markup = JSON.stringify(keyboard);
+
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const response = UrlFetchApp.fetch(url, {
+      method: 'POST',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    const result = JSON.parse(response.getContentText());
+    if (!result.ok) {
+      Logger.log('Telegram error: ' + result.description);
+      return { success: false, error: result.description };
+    }
+    return { success: true, messageId: result.result.message_id };
+  } catch (e) {
+    Logger.log('sendTelegramMessage_ error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Xử lý Telegram Webhook — đặt endpoint này làm doGet/doPost
+ * Setup: gọi setTelegramWebhook() để đăng ký URL với Telegram
+ */
+function setTelegramWebhook() {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const token = props.getProperty('TELEGRAM_BOT_TOKEN');
+    if (!token) return { success: false, error: 'Chưa có bot token' };
+
+    const deployUrl = getDeployUrl_();
+    const url = `https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(deployUrl + '?tg=1')}`;
+
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const result = JSON.parse(response.getContentText());
+    Logger.log('setTelegramWebhook: ' + JSON.stringify(result));
+    return { success: result.ok, description: result.description };
+  } catch (e) {
+    Logger.log('setTelegramWebhook error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Handler cho Telegram Bot messages
+ * Gọi từ doPost khi nhận webhook từ Telegram
+ * @param {Object} update - Telegram update object
+ */
+function handleTelegramUpdate_(update) {
+  try {
+    const message = update.message || update.callback_query?.message;
+    if (!message) return;
+
+    const chatId = message.chat.id;
+    const text = (update.message?.text || '').trim();
+    const callbackData = update.callback_query?.data;
+    const fromUser = update.message?.from || update.callback_query?.from;
+
+    // Kiểm tra quyền (chỉ admin/HR đã đăng ký mới dùng bot)
+    const approvedChats = (PropertiesService.getScriptProperties().getProperty('TELEGRAM_APPROVED_CHATS') || '')
+      .split(',').map(s => s.trim());
+    if (!approvedChats.includes(String(chatId)) && chatId.toString() !== PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID')) {
+      sendTelegramMessage_('❌ Bạn chưa được cấp quyền sử dụng bot này.', chatId);
+      return;
+    }
+
+    // Handle callback buttons (approve/reject leave)
+    if (callbackData) {
+      handleTelegramCallback_(callbackData, chatId, fromUser);
+      return;
+    }
+
+    // Handle commands
+    if (text.startsWith('/start') || text.startsWith('/help')) {
+      sendTelegramMessage_(getTelegramHelpText_(), chatId);
+    } else if (text.startsWith('/pending')) {
+      handleTelegramPendingLeaves_(chatId);
+    } else if (text.startsWith('/stats')) {
+      handleTelegramStats_(chatId);
+    } else if (text.startsWith('/interview')) {
+      handleTelegramInterviews_(chatId);
+    } else if (text.startsWith('/birthday')) {
+      handleTelegramBirthdays_(chatId);
+    } else {
+      sendTelegramMessage_('❓ Tôi không hiểu lệnh này. Gõ /help để xem danh sách lệnh.', chatId);
+    }
+  } catch (e) {
+    Logger.log('handleTelegramUpdate_ error: ' + e.message);
+  }
+}
+
+function getTelegramHelpText_() {
+  return `<b>🤖 HRIS Bot — Danh sách lệnh</b>
+
+/pending — Đơn nghỉ phép chờ duyệt
+/stats — Thống kê nhanh hôm nay
+/interview — Lịch phỏng vấn hôm nay
+/birthday — Sinh nhật trong tuần
+/help — Danh sách lệnh này
+
+<i>Bot tự động từ HRIS System</i>`;
+}
+
+function handleTelegramPendingLeaves_(chatId) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('LEAVE_REQUESTS');
+    if (!sheet) {
+      sendTelegramMessage_('📋 Chưa có dữ liệu nghỉ phép.', chatId);
+      return;
+    }
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const colId = headers.indexOf('ID_Leave');
+    const colNS = headers.indexOf('ID_NhanSu');
+    const colType = headers.indexOf('Leave_Type');
+    const colFrom = headers.indexOf('From_Date');
+    const colTo = headers.indexOf('To_Date');
+    const colStatus = headers.indexOf('Status');
+
+    const pending = data.filter((r, i) => i > 0 && r[colStatus] === 'Pending');
+
+    if (pending.length === 0) {
+      sendTelegramMessage_('✅ Không có đơn nào đang chờ duyệt.', chatId);
+      return;
+    }
+
+    let text = `<b>📋 ${pending.length} đơn đang chờ duyệt</b>\n\n`;
+    pending.slice(0, 5).forEach(r => {
+      text += `• <b>${r[colNS]}</b> — ${r[colType]}\n  Từ: ${r[colFrom]} → ${r[colTo]}\n  ID: <code>${r[colId]}</code>\n\n`;
+    });
+    if (pending.length > 5) text += `<i>... và ${pending.length - 5} đơn khác</i>`;
+
+    // Inline keyboard để duyệt từng đơn
+    const keyboard = {
+      inline_keyboard: pending.slice(0, 3).map(r => ([
+        { text: `✅ Duyệt ${r[colId]}`, callback_data: `approve:${r[colId]}` },
+        { text: `❌ Từ chối`, callback_data: `reject:${r[colId]}` }
+      ]))
+    };
+
+    sendTelegramMessage_(text, chatId, keyboard);
+  } catch (e) {
+    Logger.log('handleTelegramPendingLeaves_ error: ' + e.message);
+    sendTelegramMessage_('❌ Lỗi khi lấy dữ liệu: ' + e.message, chatId);
+  }
+}
+
+function handleTelegramCallback_(callbackData, chatId, fromUser) {
+  try {
+    const [action, leaveId] = callbackData.split(':');
+    if (!action || !leaveId) return;
+
+    // Map approver từ Telegram user
+    const approverEmail = PropertiesService.getScriptProperties().getProperty('TG_USER_' + fromUser.id) 
+      || 'telegram@hris.system';
+
+    const newStatus = action === 'approve' ? 'Approved' : 'Rejected';
+    const result = approveLeaveRequest(leaveId, newStatus, approverEmail);
+
+    if (result.success) {
+      const icon = action === 'approve' ? '✅' : '❌';
+      sendTelegramMessage_(`${icon} Đã <b>${action === 'approve' ? 'phê duyệt' : 'từ chối'}</b> đơn <code>${leaveId}</code>`, chatId);
+    } else {
+      sendTelegramMessage_(`❌ Lỗi: ${result.error}`, chatId);
+    }
+  } catch (e) {
+    Logger.log('handleTelegramCallback_ error: ' + e.message);
+  }
+}
+
+function handleTelegramStats_(chatId) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const nsSheet = ss.getSheetByName('NHAN_SU');
+    const uvSheet = ss.getSheetByName('UNG_VIEN');
+
+    if (!nsSheet) {
+      sendTelegramMessage_('❌ Không có dữ liệu nhân sự.', chatId);
+      return;
+    }
+
+    const nsData = nsSheet.getDataRange().getValues();
+    const nsHeaders = nsData[0];
+    const colStatus = nsHeaders.indexOf('Trang_Thai');
+
+    let active = 0, probation = 0;
+    for (let i = 1; i < nsData.length; i++) {
+      const s = nsData[i][colStatus];
+      if (s === 'Chính thức') active++;
+      else if (s === 'Thử việc') probation++;
+    }
+
+    let uvPending = 0;
+    if (uvSheet) {
+      const uvData = uvSheet.getDataRange().getValues();
+      const uvHeaders = uvData[0];
+      const colUvStatus = uvHeaders.indexOf('Trang_Thai');
+      uvPending = uvData.filter((r, i) => i > 0 && ['Mới nộp', 'Đang xét', 'Hẹn PV'].includes(r[colUvStatus])).length;
+    }
+
+    const text = `<b>📊 Thống kê HRIS hôm nay</b>
+${Utilities.formatDate(new Date(), 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy HH:mm')}
+
+👥 Nhân viên chính thức: <b>${active}</b>
+🔄 Đang thử việc: <b>${probation}</b>
+📋 Ứng viên đang xử lý: <b>${uvPending}</b>
+📝 Tổng nhân sự (kể cả đã nghỉ): <b>${nsData.length - 1}</b>
+
+<i>Từ HRIS System</i>`;
+
+    sendTelegramMessage_(text, chatId);
+  } catch (e) {
+    Logger.log('handleTelegramStats_ error: ' + e.message);
+    sendTelegramMessage_('❌ Lỗi khi lấy thống kê.', chatId);
+  }
+}
+
+function handleTelegramInterviews_(chatId) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('PHONG_VAN');
+    if (!sheet) {
+      sendTelegramMessage_('📋 Chưa có dữ liệu phỏng vấn.', chatId);
+      return;
+    }
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const today = Utilities.formatDate(new Date(), 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy');
+
+    const todayInterviews = data.filter((r, i) => {
+      if (i === 0) return false;
+      const ngay = r[headers.indexOf('Ngay_PV')];
+      if (!ngay) return false;
+      return Utilities.formatDate(new Date(ngay), 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy') === today;
+    });
+
+    if (todayInterviews.length === 0) {
+      sendTelegramMessage_(`📅 Hôm nay (${today}) không có lịch phỏng vấn.`, chatId);
+      return;
+    }
+
+    let text = `<b>📅 ${todayInterviews.length} phỏng vấn hôm nay (${today})</b>\n\n`;
+    todayInterviews.forEach(r => {
+      text += `• <b>${r[headers.indexOf('Ho_Ten_UV')]}</b>\n  ⏰ ${r[headers.indexOf('Gio_PV')]} | ${r[headers.indexOf('Hinh_Thuc')]}\n  👤 ${r[headers.indexOf('Nguoi_PV')]}\n\n`;
+    });
+
+    sendTelegramMessage_(text, chatId);
+  } catch (e) {
+    Logger.log('handleTelegramInterviews_ error: ' + e.message);
+  }
+}
+
+function handleTelegramBirthdays_(chatId) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('NHAN_SU');
+    if (!sheet) return;
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const colName = headers.indexOf('Ho_Ten');
+    const colDob = headers.indexOf('Ngay_Sinh');
+    const colBp = headers.indexOf('Bo_Phan');
+    const colStatus = headers.indexOf('Trang_Thai');
+
+    const today = new Date();
+    const thisWeek = [];
+
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      if (row[colStatus] === 'Đã nghỉ') continue;
+      const dob = new Date(row[colDob]);
+      if (!dob) continue;
+
+      // Kiểm tra sinh nhật trong 7 ngày tới
+      for (let d = 0; d < 7; d++) {
+        const checkDate = new Date(today);
+        checkDate.setDate(today.getDate() + d);
+        if (dob.getMonth() === checkDate.getMonth() && dob.getDate() === checkDate.getDate()) {
+          thisWeek.push({
+            name: row[colName],
+            dept: row[colBp],
+            daysLeft: d,
+            date: Utilities.formatDate(checkDate, 'Asia/Ho_Chi_Minh', 'dd/MM')
+          });
+        }
+      }
+    }
+
+    if (thisWeek.length === 0) {
+      sendTelegramMessage_('🎂 Không có sinh nhật nào trong 7 ngày tới.', chatId);
+      return;
+    }
+
+    let text = `<b>🎂 Sinh nhật tuần này</b>\n\n`;
+    thisWeek.sort((a, b) => a.daysLeft - b.daysLeft).forEach(b => {
+      const label = b.daysLeft === 0 ? '🎉 Hôm nay!' : `còn ${b.daysLeft} ngày`;
+      text += `• <b>${b.name}</b> (${b.dept}) — ${b.date} <i>(${label})</i>\n`;
+    });
+
+    sendTelegramMessage_(text, chatId);
+  } catch (e) {
+    Logger.log('handleTelegramBirthdays_ error: ' + e.message);
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// MODULE 30: MULTI-LANGUAGE
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Lưu ngôn ngữ preference của user
+ * @param {string} email
+ * @param {string} lang - 'vi' | 'en'
+ */
+function setUserLanguage(email, lang) {
+  try {
+    const validLangs = ['vi', 'en'];
+    if (!validLangs.includes(lang)) return { success: false, error: 'Ngôn ngữ không hợp lệ' };
+
+    PropertiesService.getUserProperties().setProperty('lang_' + email, lang);
+    return { success: true, lang };
+  } catch (e) {
+    Logger.log('setUserLanguage error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Lấy ngôn ngữ của user hiện tại
+ * @param {string} email
+ * @returns {string} 'vi' | 'en'
+ */
+function getUserLanguage(email) {
+  return PropertiesService.getUserProperties().getProperty('lang_' + email) || 'vi';
+}
+
+/**
+ * Translation dictionary — trả về object i18n đầy đủ
+ * @param {string} lang - 'vi' | 'en'
+ * @returns {Object}
+ */
+function getTranslations(lang) {
+  const translations = {
+    vi: {
+      // Navigation
+      nav_dashboard: 'Tổng quan',
+      nav_employees: 'Nhân sự',
+      nav_recruitment: 'Tuyển dụng',
+      nav_interviews: 'Phỏng vấn',
+      nav_onboarding: 'Onboarding',
+      nav_kpi: 'KPI & Hiệu suất',
+      nav_payroll: 'Bảng lương',
+      nav_leave: 'Nghỉ phép',
+      nav_reports: 'Báo cáo',
+      nav_audit: 'Audit Log',
+      nav_settings: 'Cài đặt',
+      // Dashboard
+      dash_total_employees: 'Tổng nhân viên',
+      dash_new_this_month: 'Mới tháng này',
+      dash_open_positions: 'Vị trí tuyển dụng',
+      dash_pending_reviews: 'Chờ đánh giá',
+      // Actions
+      btn_add: 'Thêm mới',
+      btn_edit: 'Chỉnh sửa',
+      btn_delete: 'Xóa',
+      btn_save: 'Lưu',
+      btn_cancel: 'Hủy',
+      btn_approve: 'Phê duyệt',
+      btn_reject: 'Từ chối',
+      btn_export: 'Xuất file',
+      btn_search: 'Tìm kiếm',
+      btn_filter: 'Lọc',
+      btn_close: 'Đóng',
+      // Status
+      status_active: 'Chính thức',
+      status_probation: 'Thử việc',
+      status_intern: 'Thực tập',
+      status_left: 'Đã nghỉ',
+      status_pending: 'Chờ xử lý',
+      status_approved: 'Đã duyệt',
+      status_rejected: 'Từ chối',
+      // Messages
+      msg_save_success: 'Lưu thành công!',
+      msg_delete_success: 'Đã xóa!',
+      msg_error: 'Có lỗi xảy ra. Vui lòng thử lại.',
+      msg_loading: 'Đang tải...',
+      msg_no_data: 'Không có dữ liệu',
+      msg_confirm_delete: 'Bạn có chắc chắn muốn xóa?',
+      // Forms
+      form_full_name: 'Họ tên',
+      form_department: 'Bộ phận',
+      form_position: 'Chức vụ',
+      form_join_date: 'Ngày vào làm',
+      form_birth_date: 'Ngày sinh',
+      form_phone: 'Số điện thoại',
+      form_email: 'Email',
+      form_status: 'Trạng thái',
+      form_note: 'Ghi chú',
+      // Leave
+      leave_annual: 'Nghỉ phép năm',
+      leave_sick: 'Nghỉ bệnh',
+      leave_unpaid: 'Nghỉ không lương',
+      leave_maternity: 'Nghỉ thai sản',
+      leave_from: 'Từ ngày',
+      leave_to: 'Đến ngày',
+      leave_reason: 'Lý do',
+    },
+    en: {
+      // Navigation
+      nav_dashboard: 'Dashboard',
+      nav_employees: 'Employees',
+      nav_recruitment: 'Recruitment',
+      nav_interviews: 'Interviews',
+      nav_onboarding: 'Onboarding',
+      nav_kpi: 'KPI & Performance',
+      nav_payroll: 'Payroll',
+      nav_leave: 'Leave',
+      nav_reports: 'Reports',
+      nav_audit: 'Audit Log',
+      nav_settings: 'Settings',
+      // Dashboard
+      dash_total_employees: 'Total Employees',
+      dash_new_this_month: 'New This Month',
+      dash_open_positions: 'Open Positions',
+      dash_pending_reviews: 'Pending Reviews',
+      // Actions
+      btn_add: 'Add New',
+      btn_edit: 'Edit',
+      btn_delete: 'Delete',
+      btn_save: 'Save',
+      btn_cancel: 'Cancel',
+      btn_approve: 'Approve',
+      btn_reject: 'Reject',
+      btn_export: 'Export',
+      btn_search: 'Search',
+      btn_filter: 'Filter',
+      btn_close: 'Close',
+      // Status
+      status_active: 'Active',
+      status_probation: 'Probation',
+      status_intern: 'Intern',
+      status_left: 'Left',
+      status_pending: 'Pending',
+      status_approved: 'Approved',
+      status_rejected: 'Rejected',
+      // Messages
+      msg_save_success: 'Saved successfully!',
+      msg_delete_success: 'Deleted!',
+      msg_error: 'An error occurred. Please try again.',
+      msg_loading: 'Loading...',
+      msg_no_data: 'No data available',
+      msg_confirm_delete: 'Are you sure you want to delete?',
+      // Forms
+      form_full_name: 'Full Name',
+      form_department: 'Department',
+      form_position: 'Position',
+      form_join_date: 'Join Date',
+      form_birth_date: 'Birth Date',
+      form_phone: 'Phone',
+      form_email: 'Email',
+      form_status: 'Status',
+      form_note: 'Note',
+      // Leave
+      leave_annual: 'Annual Leave',
+      leave_sick: 'Sick Leave',
+      leave_unpaid: 'Unpaid Leave',
+      leave_maternity: 'Maternity Leave',
+      leave_from: 'From Date',
+      leave_to: 'To Date',
+      leave_reason: 'Reason',
+    }
+  };
+
+  return translations[lang] || translations['vi'];
+}
+
+/**
+ * Trả về translations cho frontend (gọi từ JS qua google.script.run)
+ */
+function getI18n() {
+  const email = Session.getActiveUser().getEmail();
+  const lang = getUserLanguage(email);
+  return { lang, translations: getTranslations(lang) };
+}
+
+
+// ─────────────────────────────────────────────────────────
+// MODULE 30: DARK MODE
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Lưu dark mode preference của user
+ * @param {string} email
+ * @param {boolean} isDark
+ */
+function setUserDarkMode(email, isDark) {
+  PropertiesService.getUserProperties().setProperty('darkMode_' + email, isDark ? 'true' : 'false');
+  return { success: true, darkMode: isDark };
+}
+
+/**
+ * Lấy dark mode preference
+ * @param {string} email
+ * @returns {boolean}
+ */
+function getUserDarkMode(email) {
+  return PropertiesService.getUserProperties().getProperty('darkMode_' + email) === 'true';
+}
+
+/**
+ * Lấy tất cả user preferences (lang + darkMode) trong 1 call
+ */
+function getUserPreferences() {
+  const email = Session.getActiveUser().getEmail();
+  return {
+    lang: getUserLanguage(email),
+    darkMode: getUserDarkMode(email),
+    translations: getTranslations(getUserLanguage(email))
+  };
+}
+
+/**
+ * JavaScript cho Dark Mode và i18n (inject vào HTML)
+ */
+function getDarkModeAndI18nJs() {
+  return `
+// ─── Dark Mode (Module 30) ───
+function initDarkMode(isDark) {
+  if (isDark) {
+    document.documentElement.classList.add('dark-mode');
+    const btn = document.getElementById('darkModeToggle');
+    if (btn) btn.textContent = '☀️';
+  }
+}
+
+function toggleDarkMode() {
+  const isDark = document.documentElement.classList.toggle('dark-mode');
+  const btn = document.getElementById('darkModeToggle');
+  if (btn) btn.textContent = isDark ? '☀️' : '🌙';
+
+  // Lưu preference
+  google.script.run
+    .withFailureHandler(err => console.error('Dark mode save error:', err))
+    .setUserDarkMode(window._currentUserEmail, isDark);
+}
+
+// ─── i18n (Module 30) ───
+let _t = {}; // translations
+let _currentLang = 'vi';
+
+function initI18n(prefs) {
+  _t = prefs.translations || {};
+  _currentLang = prefs.lang || 'vi';
+  applyTranslations_();
+  initDarkMode(prefs.darkMode);
+}
+
+function t(key) {
+  return _t[key] || key;
+}
+
+function applyTranslations_() {
+  // Tự động dịch các element có data-i18n attribute
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    if (_t[key]) {
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        el.placeholder = _t[key];
+      } else {
+        el.textContent = _t[key];
+      }
+    }
+  });
+}
+
+function switchLanguage(lang) {
+  google.script.run
+    .withSuccessHandler(prefs => { initI18n(prefs); showToast(lang === 'en' ? 'Language: English' : 'Ngôn ngữ: Tiếng Việt', 'success'); })
+    .withFailureHandler(err => console.error('Lang switch error:', err))
+    .setUserLanguageAndGetPrefs(lang);
+}
+`.trim();
+}
+
+/**
+ * Set language và return preferences (helper cho frontend 1 call)
+ */
+function setUserLanguageAndGetPrefs(lang) {
+  const email = Session.getActiveUser().getEmail();
+  setUserLanguage(email, lang);
+  return getUserPreferences();
+}
+
+
+// ─────────────────────────────────────────────────────────
+// MODULE 30: ACTIVITY FEED (Notification Center)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Lấy activity feed từ AUDIT_LOG (200 bản ghi gần nhất, đã filter)
+ * @param {number} [limit=20]
+ * @returns {Object[]}
+ */
+function getActivityFeed(limit) {
+  try {
+    const maxRows = limit || 20;
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('AUDIT_LOG');
+    if (!sheet) return { success: true, activities: [] };
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const colTime = headers.indexOf('Thoi_Gian');
+    const colEmail = headers.indexOf('Email');
+    const colAction = headers.indexOf('Hanh_Dong');
+    const colSheet = headers.indexOf('Sheet');
+    const colId = headers.indexOf('ID_Ban_Ghi');
+    const colField = headers.indexOf('Truong_Thay_Doi');
+    const colOld = headers.indexOf('Gia_Tri_Cu');
+    const colNew = headers.indexOf('Gia_Tri_Moi');
+    const colNote = headers.indexOf('Ghi_Chu');
+
+    // Filter bỏ ERROR và LOGIN routine, chỉ lấy thao tác thực
+    const meaningful = ['CREATE', 'UPDATE', 'DELETE'];
+    const filtered = data
+      .slice(1)
+      .filter(r => meaningful.includes(r[colAction]) && r[colSheet] && r[colSheet] !== 'AUDIT_LOG')
+      .reverse() // Mới nhất trước
+      .slice(0, maxRows);
+
+    const activities = filtered.map(r => {
+      const action = r[colAction];
+      const sheetName = r[colSheet];
+      const id = r[colId];
+      const time = r[colTime];
+
+      return {
+        id: id + '_' + (time instanceof Date ? time.getTime() : time),
+        time: time instanceof Date ? Utilities.formatDate(time, 'Asia/Ho_Chi_Minh', 'dd/MM HH:mm') : String(time),
+        timestamp: time instanceof Date ? time.getTime() : 0,
+        action,
+        icon: action === 'CREATE' ? '➕' : action === 'UPDATE' ? '✏️' : '🗑️',
+        color: action === 'CREATE' ? 'green' : action === 'UPDATE' ? 'purple' : 'red',
+        actor: r[colEmail] ? r[colEmail].split('@')[0] : '—',
+        actorFull: r[colEmail] || '',
+        sheet: sheetName,
+        sheetLabel: getSheetLabel_(sheetName),
+        recordId: id,
+        field: r[colField] || '',
+        oldValue: r[colOld] || '',
+        newValue: r[colNew] || '',
+        note: r[colNote] || '',
+        summary: buildActivitySummary_(action, sheetName, id, r[colField], r[colOld], r[colNew])
+      };
+    });
+
+    return { success: true, activities };
+  } catch (e) {
+    Logger.log('getActivityFeed error: ' + e.message);
+    return { success: false, error: e.message, activities: [] };
+  }
+}
+
+/**
+ * Lấy notification chưa đọc cho user hiện tại
+ */
+function getUnreadNotifications() {
+  try {
+    const email = Session.getActiveUser().getEmail();
+    const lastRead = parseInt(PropertiesService.getUserProperties().getProperty('notif_last_read_' + email) || '0');
+
+    const feedResult = getActivityFeed(50);
+    if (!feedResult.success) return { success: true, count: 0, notifications: [] };
+
+    const unread = feedResult.activities.filter(a => a.timestamp > lastRead);
+    return { success: true, count: unread.length, notifications: unread.slice(0, 10) };
+  } catch (e) {
+    Logger.log('getUnreadNotifications error: ' + e.message);
+    return { success: true, count: 0, notifications: [] };
+  }
+}
+
+/**
+ * Đánh dấu đã đọc tất cả notifications
+ */
+function markNotificationsRead() {
+  const email = Session.getActiveUser().getEmail();
+  PropertiesService.getUserProperties().setProperty('notif_last_read_' + email, String(Date.now()));
+  return { success: true };
+}
+
+/**
+ * Helper: Tên thân thiện của sheet
+ */
+function getSheetLabel_(sheetName) {
+  const labels = {
+    'NHAN_SU': 'Nhân sự',
+    'UNG_VIEN': 'Ứng viên',
+    'PHONG_VAN': 'Phỏng vấn',
+    'KPI': 'KPI',
+    'ONBOARDING_TASKS': 'Onboarding',
+    'PAYROLL': 'Bảng lương',
+    'LEAVE_REQUESTS': 'Nghỉ phép',
+    'PHAN_QUYEN': 'Phân quyền',
+    'ATTENDANCE': 'Chấm công'
+  };
+  return labels[sheetName] || sheetName;
+}
+
+/**
+ * Helper: Tạo tóm tắt dễ đọc cho activity
+ */
+function buildActivitySummary_(action, sheetName, id, field, oldVal, newVal) {
+  const sheetLabel = getSheetLabel_(sheetName);
+  if (action === 'CREATE') return `Thêm mới vào ${sheetLabel} (${id})`;
+  if (action === 'DELETE') return `Xóa khỏi ${sheetLabel} (${id})`;
+  if (action === 'UPDATE') {
+    if (field === 'Trang_Thai') return `Đổi trạng thái: "${oldVal}" → "${newVal}" (${id})`;
+    return `Cập nhật ${field} trong ${sheetLabel} (${id})`;
+  }
+  return `${action} ${sheetLabel}`;
+}
+
+/**
+ * HTML cho Notification Center (inject vào topbar)
+ */
+function getNotificationCenterHtml() {
+  return `
+<!-- Notification Bell (Module 30) -->
+<div class="notification-bell" id="notificationBell" style="position:relative;display:inline-block;margin-right:8px;">
+  <button class="btn btn-ghost btn-sm" onclick="toggleNotifPanel()" 
+    style="font-size:20px;padding:6px 10px;position:relative;" title="Thông báo">
+    🔔
+    <span id="notifBadge" class="notif-badge" style="
+      display:none;position:absolute;top:2px;right:2px;
+      background:#C0392B;color:white;border-radius:10px;
+      font-size:10px;font-weight:700;padding:1px 5px;min-width:16px;
+      text-align:center;line-height:16px;
+    ">0</span>
+  </button>
+  <div id="notifPanel" class="notif-panel" style="
+    display:none;position:absolute;right:0;top:44px;
+    width:360px;max-height:440px;overflow-y:auto;
+    background:var(--surface,#fff);border:1px solid var(--border,#e0e0e0);
+    border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.12);
+    z-index:900;font-family:'Be Vietnam Pro',sans-serif;
+  ">
+    <div style="padding:14px 16px;border-bottom:1px solid var(--border,#eee);display:flex;align-items:center;justify-content:space-between;">
+      <span style="font-weight:700;font-size:15px;color:var(--text-1,#1A1A1A);">Hoạt động gần đây</span>
+      <button onclick="markAllRead()" style="background:none;border:none;color:#3D35A8;font-size:13px;cursor:pointer;font-family:inherit;">Đọc tất cả</button>
+    </div>
+    <div id="notifList" style="padding:8px 0;">
+      <div style="padding:20px;text-align:center;color:#888;font-size:13px;">Đang tải...</div>
+    </div>
+  </div>
+</div>
+`.trim();
+}
+
+/**
+ * JavaScript cho Notification Center
+ */
+function getNotificationCenterJs() {
+  return `
+// ─── Notification Center (Module 30) ───
+let _notifOpen = false;
+
+function initNotifications() {
+  google.script.run
+    .withSuccessHandler(result => {
+      if (result.count > 0) {
+        const badge = document.getElementById('notifBadge');
+        if (badge) { badge.textContent = result.count > 9 ? '9+' : result.count; badge.style.display = 'block'; }
+      }
+    })
+    .withFailureHandler(() => {})
+    .getUnreadNotifications();
+}
+
+function toggleNotifPanel() {
+  const panel = document.getElementById('notifPanel');
+  _notifOpen = !_notifOpen;
+  panel.style.display = _notifOpen ? 'block' : 'none';
+  if (_notifOpen) loadActivityFeed();
+
+  // Close on click outside
+  if (_notifOpen) {
+    setTimeout(() => {
+      document.addEventListener('click', closeNotifOnOutsideClick_, { once: true });
+    }, 100);
+  }
+}
+
+function closeNotifOnOutsideClick_(e) {
+  const bell = document.getElementById('notificationBell');
+  if (bell && !bell.contains(e.target)) {
+    document.getElementById('notifPanel').style.display = 'none';
+    _notifOpen = false;
+  }
+}
+
+function loadActivityFeed() {
+  const list = document.getElementById('notifList');
+  if (!list) return;
+  list.innerHTML = '<div style="padding:20px;text-align:center;color:#888;font-size:13px;">Đang tải...</div>';
+
+  google.script.run
+    .withSuccessHandler(result => {
+      if (!result.activities || result.activities.length === 0) {
+        list.innerHTML = '<div style="padding:20px;text-align:center;color:#888;font-size:13px;">Chưa có hoạt động nào</div>';
+        return;
+      }
+      list.innerHTML = result.activities.map(a => renderActivityItem_(a)).join('');
+    })
+    .withFailureHandler(() => {
+      list.innerHTML = '<div style="padding:20px;text-align:center;color:#C0392B;font-size:13px;">Lỗi tải dữ liệu</div>';
+    })
+    .getActivityFeed(20);
+}
+
+function renderActivityItem_(a) {
+  const colorMap = { green: '#1D9E75', purple: '#3D35A8', red: '#C0392B' };
+  const color = colorMap[a.color] || '#888';
+  return \`<div style="padding:10px 16px;border-bottom:1px solid var(--border,#f0f0f0);display:flex;gap:10px;align-items:flex-start;cursor:default;transition:background .12s;" 
+    onmouseover="this.style.background='var(--bg,#f7f6f3)'" onmouseout="this.style.background=''">
+    <span style="font-size:18px;line-height:1.4;">\${a.icon}</span>
+    <div style="flex:1;min-width:0;">
+      <div style="font-size:13px;color:var(--text-1,#1A1A1A);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">\${a.summary}</div>
+      <div style="font-size:11px;color:#888;margin-top:2px;">
+        <span style="color:\${color};font-weight:600;">\${a.actor}</span> · \${a.time}
+      </div>
+    </div>
+  </div>\`;
+}
+
+function markAllRead() {
+  google.script.run
+    .withSuccessHandler(() => {
+      const badge = document.getElementById('notifBadge');
+      if (badge) badge.style.display = 'none';
+      showToast('✅ Đã đọc tất cả thông báo', 'success');
+    })
+    .withFailureHandler(() => {})
+    .markNotificationsRead();
+}
+`.trim();
+}
+
+
+// ─────────────────────────────────────────────────────────
+// SETUP TRIGGERS (GĐ 6)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Cài tất cả trigger cho GĐ6
+ * Gọi 1 lần sau khi deploy
+ */
+function setupGd6Triggers() {
+  try {
+    // Xóa trigger GĐ6 cũ nếu có
+    const allTriggers = ScriptApp.getProjectTriggers();
+    const gd6Functions = ['runSlackInterviewReminder', 'runBulkBirthdayCalendarSync'];
+    allTriggers.forEach(trigger => {
+      if (gd6Functions.includes(trigger.getHandlerFunction())) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+
+    // Nhắc lịch PV mỗi tối 20:00
+    ScriptApp.newTrigger('runSlackInterviewReminder')
+      .timeBased()
+      .atHour(20)
+      .everyDays(1)
+      .inTimezone('Asia/Ho_Chi_Minh')
+      .create();
+
+    Logger.log('✅ GĐ6 triggers đã được cài đặt');
+    return {
+      success: true,
+      triggers: ['runSlackInterviewReminder @ 20:00 daily']
+    };
+  } catch (e) {
+    Logger.log('setupGd6Triggers error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Setup toàn bộ GĐ6 (gọi 1 lần)
+ * Thứ tự: triggers → forms → calendar check
+ */
+function setupGiaiDoan6() {
+  Logger.log('═══════════════════════════════');
+  Logger.log('SETUP GIAI ĐOẠN 6 — BẮT ĐẦU');
+  Logger.log('═══════════════════════════════');
+
+  const results = {};
+
+  // 1. Triggers
+  results.triggers = setupGd6Triggers();
+  Logger.log('Triggers: ' + JSON.stringify(results.triggers));
+
+  // 2. Leave Request Form
+  results.leaveForm = setupLeaveRequestForm();
+  Logger.log('Leave Form: ' + JSON.stringify(results.leaveForm));
+
+  // 3. Attendance Form
+  results.attendanceForm = setupAttendanceForm();
+  Logger.log('Attendance Form: ' + JSON.stringify(results.attendanceForm));
+
+  // 4. Calendar check
+  try {
+    const cal = CalendarApp.getDefaultCalendar();
+    results.calendar = { success: true, name: cal.getName() };
+  } catch (e) {
+    results.calendar = { success: false, error: e.message };
+  }
+
+  Logger.log('═══════════════════════════════');
+  Logger.log('SETUP GIAI ĐOẠN 6 — HOÀN TẤT');
+  Logger.log('Kết quả: ' + JSON.stringify(results));
+  Logger.log('');
+  Logger.log('Bước tiếp theo:');
+  Logger.log('1. setSlackWebhook("https://hooks.slack.com/services/...") — thêm Slack');
+  Logger.log('2. setTelegramConfig("BOT_TOKEN", "CHAT_ID") → setTelegramWebhook() — thêm Telegram');
+  Logger.log('3. setTeamsWebhook("https://...") — thêm Teams (optional)');
+  Logger.log('4. runBulkBirthdayCalendarSync() — tạo event sinh nhật hàng loạt (đầu năm)');
+  Logger.log('5. Copy Leave Form URL vào tài liệu nội bộ: ' + (results.leaveForm.formUrl || 'N/A'));
+  Logger.log('6. Copy Attendance Form URL: ' + (results.attendanceForm.formUrl || 'N/A'));
+  Logger.log('═══════════════════════════════');
+
+  return results;
+}
+
+
+// ─────────────────────────────────────────────────────────
+// HANDLER CHÍNH — Tích hợp vào handleRequest() GĐ1
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Xử lý các action của GĐ6 từ frontend
+ * Thêm case này vào switch của handleRequest() trong GĐ1
+ */
+function handleGd6Action_(action, data, userEmail, userRole) {
+  switch (action) {
+    // PWA
+    case 'getPwaManifest':
+      return { success: true, manifest: getPwaManifest() };
+
+    // Calendar
+    case 'createCalendarPV':
+      if (!hasPermission_(userEmail, ['ADMIN', 'HR'])) return { success: false, error: 'Không có quyền' };
+      return createCalendarEventPhongVan(data);
+    case 'createCalendarSinhNhat':
+      if (!hasPermission_(userEmail, ['ADMIN', 'HR'])) return { success: false, error: 'Không có quyền' };
+      return createCalendarEventSinhNhat(data);
+    case 'createCalendarOnboarding':
+      if (!hasPermission_(userEmail, ['ADMIN', 'HR'])) return { success: false, error: 'Không có quyền' };
+      return createCalendarEventOnboarding(data);
+    case 'bulkBirthdaySync':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Chỉ Admin mới chạy được' };
+      return runBulkBirthdayCalendarSync();
+
+    // Leave
+    case 'approveLeave':
+      return approveLeaveRequest(data.leaveId, data.action, userEmail);
+    case 'getLeaveRequests':
+      return getLeaveRequests_(userEmail, userRole, data);
+
+    // Notifications
+    case 'getActivityFeed':
+      return getActivityFeed(data?.limit || 20);
+    case 'getUnreadNotifications':
+      return getUnreadNotifications();
+    case 'markNotificationsRead':
+      return markNotificationsRead();
+
+    // Preferences
+    case 'getUserPreferences':
+      return getUserPreferences();
+    case 'setLanguage':
+      return setUserLanguageAndGetPrefs(data.lang);
+    case 'setDarkMode':
+      return setUserDarkMode(userEmail, data.isDark);
+
+    // Slack test
+    case 'testSlack':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Không có quyền' };
+      return sendSlackMessage_('🧪 Test từ HRIS — ' + new Date().toLocaleString('vi-VN'), 'general');
+
+    // Telegram test
+    case 'testTelegram':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Không có quyền' };
+      return sendTelegramMessage_('🧪 <b>Test từ HRIS</b>\n' + new Date().toLocaleString('vi-VN'));
+
+    // Setup (Admin only)
+    case 'setupLeaveForm':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Chỉ Admin' };
+      return setupLeaveRequestForm();
+    case 'setupAttendanceForm':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Chỉ Admin' };
+      return setupAttendanceForm();
+    case 'setSlackWebhook':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Chỉ Admin' };
+      return setSlackWebhook(data.webhookUrl);
+    case 'setTeamsWebhook':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Chỉ Admin' };
+      return setTeamsWebhook(data.webhookUrl);
+    case 'setTelegramConfig':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Chỉ Admin' };
+      return setTelegramConfig(data.botToken, data.chatId);
+    case 'setTelegramWebhook':
+      if (!hasPermission_(userEmail, ['ADMIN'])) return { success: false, error: 'Chỉ Admin' };
+      return setTelegramWebhook();
+
+    default:
+      return null; // Không phải GĐ6 action, pass sang handler khác
+  }
+}
+
+/**
+ * Lấy danh sách đơn nghỉ phép (có filter theo role)
+ */
+function getLeaveRequests_(userEmail, userRole, filters) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('LEAVE_REQUESTS');
+    if (!sheet) return { success: true, data: [] };
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const colNS = headers.indexOf('ID_NhanSu');
+    const colEmail = headers.indexOf('Email_NhanSu');
+    const colStatus = headers.indexOf('Status');
+
+    let rows = data.slice(1).map(r => {
+      const obj = {};
+      headers.forEach((h, i) => obj[h] = r[i]);
+      return obj;
+    });
+
+    // Filter theo role
+    if (userRole === 'EMPLOYEE') {
+      rows = rows.filter(r => r['Email_NhanSu'] === userEmail);
+    } else if (userRole === 'MANAGER') {
+      // Manager chỉ thấy bộ phận của mình — cần join với NHAN_SU
+      // Simplified: thấy tất cả pending
+      rows = rows.filter(r => r['Status'] === 'Pending');
+    }
+
+    // Filter theo status nếu có
+    if (filters?.status) rows = rows.filter(r => r['Status'] === filters.status);
+
+    return { success: true, data: rows.reverse().slice(0, 100) };
+  } catch (e) {
+    Logger.log('getLeaveRequests_ error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────
+// HELPERS (Private — dùng chung)
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Lấy deploy URL của webapp hiện tại
+ */
+function getDeployUrl_() {
+  try {
+    return ScriptApp.getService().getUrl();
+  } catch (e) {
+    return PropertiesService.getScriptProperties().getProperty('DEPLOY_URL') || '';
+  }
+}
+
+/**
+ * Lấy config value từ PropertiesService
+ */
+function getConfig_(key) {
+  return PropertiesService.getScriptProperties().getProperty(key) || '';
+}
+
+/**
+ * Build HTML email xác nhận đơn nghỉ phép
+ */
+function sendLeaveConfirmationEmail_(toEmail, nsId, leaveType, fromDate, toDate, leaveId) {
+  try {
+    const subject = '[HRIS] Đã nhận đơn xin nghỉ phép của bạn';
+    const html = `
+<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#fff;">
+  <div style="background:#3D35A8;color:white;padding:20px 24px;border-radius:8px 8px 0 0;text-align:center;">
+    <h2 style="margin:0;font-size:20px;">HRIS — Xác nhận đơn nghỉ phép</h2>
+  </div>
+  <div style="padding:24px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;">
+    <p style="color:#555;font-size:15px;">Xin chào,</p>
+    <p style="color:#555;font-size:15px;">Hệ thống đã nhận đơn xin nghỉ phép của bạn. HR sẽ xử lý trong 24 giờ.</p>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;color:#1A1A1A;width:40%;">Mã nhân viên</td><td style="padding:10px;border:1px solid #e0e0e0;color:#555;">${nsId}</td></tr>
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;color:#1A1A1A;">Loại nghỉ</td><td style="padding:10px;border:1px solid #e0e0e0;color:#555;">${leaveType}</td></tr>
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;color:#1A1A1A;">Từ ngày</td><td style="padding:10px;border:1px solid #e0e0e0;color:#555;">${fromDate}</td></tr>
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;color:#1A1A1A;">Đến ngày</td><td style="padding:10px;border:1px solid #e0e0e0;color:#555;">${toDate}</td></tr>
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;color:#1A1A1A;">Mã đơn</td><td style="padding:10px;border:1px solid #e0e0e0;color:#3D35A8;font-weight:bold;">${leaveId}</td></tr>
+    </table>
+    <p style="color:#888;font-size:13px;margin-top:20px;">Email tự động từ HRIS System. Vui lòng không reply email này.</p>
+  </div>
+</div>`;
+    MailApp.sendEmail({ to: toEmail, subject, htmlBody: html });
+  } catch (e) {
+    Logger.log('sendLeaveConfirmationEmail_ error: ' + e.message);
+  }
+}
+
+/**
+ * Gửi email yêu cầu duyệt đơn nghỉ phép cho HR
+ */
+function sendLeaveApprovalRequestEmail_(leaveId, nsId, leaveType, fromDate, toDate, reason) {
+  try {
+    const hrEmail = getConfig_('HR_EMAIL') || getConfig_('ADMIN_EMAIL');
+    if (!hrEmail) return;
+
+    const deployUrl = getDeployUrl_();
+    const approveUrl = `${deployUrl}?action=approveLeave&leaveId=${leaveId}&status=Approved`;
+    const rejectUrl = `${deployUrl}?action=approveLeave&leaveId=${leaveId}&status=Rejected`;
+
+    const subject = `[HRIS] Đơn nghỉ phép mới cần duyệt — ${nsId}`;
+    const html = `
+<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#fff;">
+  <div style="background:#BA7517;color:white;padding:20px 24px;border-radius:8px 8px 0 0;text-align:center;">
+    <h2 style="margin:0;font-size:20px;">📋 Đơn nghỉ phép mới</h2>
+  </div>
+  <div style="padding:24px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;">
+    <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;width:40%;">Mã nhân viên</td><td style="padding:10px;border:1px solid #e0e0e0;">${nsId}</td></tr>
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;">Loại nghỉ</td><td style="padding:10px;border:1px solid #e0e0e0;">${leaveType}</td></tr>
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;">Từ → Đến</td><td style="padding:10px;border:1px solid #e0e0e0;">${fromDate} → ${toDate}</td></tr>
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;">Lý do</td><td style="padding:10px;border:1px solid #e0e0e0;">${reason || '—'}</td></tr>
+      <tr><td style="padding:10px;background:#f4f4f2;font-weight:bold;">Mã đơn</td><td style="padding:10px;border:1px solid #e0e0e0;font-weight:bold;color:#3D35A8;">${leaveId}</td></tr>
+    </table>
+    <div style="text-align:center;margin-top:20px;display:flex;gap:12px;justify-content:center;">
+      <a href="${approveUrl}" style="background:#1D9E75;color:white;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:15px;">✅ Phê duyệt</a>
+      <a href="${rejectUrl}" style="background:#C0392B;color:white;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:15px;">❌ Từ chối</a>
+    </div>
+    <p style="color:#888;font-size:12px;margin-top:20px;text-align:center;">HRIS System — Hoặc vào phần Nghỉ phép trên hệ thống để duyệt.</p>
+  </div>
+</div>`;
+    MailApp.sendEmail({ to: hrEmail, subject, htmlBody: html });
+  } catch (e) {
+    Logger.log('sendLeaveApprovalRequestEmail_ error: ' + e.message);
+  }
+}
+
+/**
+ * Build HTML email kết quả đơn nghỉ phép
+ */
+function buildLeaveResultEmailHtml_(leaveId, action, approverEmail, rowData) {
+  const isApproved = action === 'Approved';
+  const headerColor = isApproved ? '#1D9E75' : '#C0392B';
+  const icon = isApproved ? '✅' : '❌';
+  const statusText = isApproved ? 'ĐÃ ĐƯỢC PHÊ DUYỆT' : 'BỊ TỪ CHỐI';
+
+  return `
+<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#fff;">
+  <div style="background:${headerColor};color:white;padding:20px 24px;border-radius:8px 8px 0 0;text-align:center;">
+    <h2 style="margin:0;font-size:20px;">${icon} Đơn nghỉ phép ${statusText}</h2>
+  </div>
+  <div style="padding:24px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;">
+    <p style="color:#555;font-size:15px;">Đơn nghỉ phép <strong>${leaveId}</strong> của bạn đã được xử lý.</p>
+    <p style="color:#555;font-size:14px;">Người duyệt: <strong>${approverEmail}</strong></p>
+    ${!isApproved ? '<p style="color:#C0392B;font-size:14px;background:#FCEBEB;padding:12px;border-radius:6px;">Nếu cần giải thích thêm, vui lòng liên hệ HR trực tiếp.</p>' : ''}
+    <p style="color:#888;font-size:12px;margin-top:20px;">Email tự động từ HRIS System.</p>
+  </div>
+</div>`;
+}
+
+
+// ─────────────────────────────────────────────────────────
+// SETTINGS PAGE — UI cho GĐ6
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Trả về HTML section Settings cho GĐ6
+ * Paste vào phần settings của HTML chính
+ */
+function getSettingsHtml() {
+  return `
+<!-- GĐ6 Settings Section -->
+<div class="panel" id="gd6-settings">
+  <div class="panel-header">
+    <h3 class="panel-title">⚙️ Tích hợp & Thông báo (Giai đoạn 6)</h3>
+  </div>
+  <div class="panel-body">
+    
+    <!-- Slack -->
+    <div class="form-group" style="margin-bottom:20px;">
+      <label class="form-label" style="font-weight:700;color:#1A1A1A;">💬 Slack Webhook</label>
+      <div class="form-row">
+        <input type="text" id="slackWebhookInput" class="form-control" 
+          placeholder="https://hooks.slack.com/services/..." style="flex:1;">
+        <button class="btn btn-primary" onclick="saveSlackWebhook()" style="white-space:nowrap;">Lưu</button>
+        <button class="btn btn-ghost" onclick="testSlack()" style="white-space:nowrap;">Test</button>
+      </div>
+    </div>
+
+    <!-- Teams -->
+    <div class="form-group" style="margin-bottom:20px;">
+      <label class="form-label" style="font-weight:700;color:#1A1A1A;">🔵 Microsoft Teams Webhook</label>
+      <div class="form-row">
+        <input type="text" id="teamsWebhookInput" class="form-control" 
+          placeholder="https://...webhook.office.com/..." style="flex:1;">
+        <button class="btn btn-primary" onclick="saveTeamsWebhook()" style="white-space:nowrap;">Lưu</button>
+      </div>
+    </div>
+
+    <!-- Telegram -->
+    <div class="form-group" style="margin-bottom:20px;">
+      <label class="form-label" style="font-weight:700;color:#1A1A1A;">✈️ Telegram Bot</label>
+      <div class="form-row">
+        <input type="text" id="tgTokenInput" class="form-control" placeholder="Bot Token (từ @BotFather)" style="flex:1;">
+        <input type="text" id="tgChatIdInput" class="form-control" placeholder="Chat ID" style="width:160px;">
+        <button class="btn btn-primary" onclick="saveTelegramConfig()" style="white-space:nowrap;">Lưu</button>
+        <button class="btn btn-ghost" onclick="testTelegram()" style="white-space:nowrap;">Test</button>
+      </div>
+      <button class="btn btn-ghost" style="margin-top:8px;font-size:13px;" onclick="registerTelegramWebhook()">
+        🔗 Đăng ký Webhook Telegram
+      </button>
+    </div>
+
+    <!-- Language -->
+    <div class="form-group" style="margin-bottom:20px;">
+      <label class="form-label" style="font-weight:700;color:#1A1A1A;">🌐 Ngôn ngữ</label>
+      <div style="display:flex;gap:10px;">
+        <button class="btn" id="langViBtn" onclick="switchLanguage('vi')" style="border:2px solid #3D35A8;color:#3D35A8;">🇻🇳 Tiếng Việt</button>
+        <button class="btn btn-ghost" id="langEnBtn" onclick="switchLanguage('en')">🇬🇧 English</button>
+      </div>
+    </div>
+
+    <!-- Dark Mode -->
+    <div class="form-group" style="margin-bottom:20px;">
+      <label class="form-label" style="font-weight:700;color:#1A1A1A;">🌙 Giao diện</label>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <label class="toggle-switch" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+          <input type="checkbox" id="darkModeCheckbox" onchange="toggleDarkMode()" style="display:none;">
+          <div id="darkModeToggleSlider" style="width:48px;height:26px;background:#ccc;border-radius:13px;position:relative;transition:.2s;">
+            <div style="position:absolute;top:3px;left:3px;width:20px;height:20px;background:white;border-radius:50%;transition:.2s;" id="darkSliderKnob"></div>
+          </div>
+          <span style="font-size:14px;color:#555;">Chế độ tối</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Google Forms -->
+    <div class="form-group">
+      <label class="form-label" style="font-weight:700;color:#1A1A1A;">📋 Google Forms</label>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-ghost" onclick="setupLeaveForm()">📝 Tạo Form Nghỉ phép</button>
+        <button class="btn btn-ghost" onclick="setupAttendanceForm()">🕐 Tạo Form Chấm công</button>
+        <button class="btn btn-ghost" onclick="syncBirthdayCalendar()">🎂 Sync Sinh nhật → Calendar</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+`.trim();
+}
+
+/**
+ * JavaScript cho Settings page
+ */
+function getSettingsJs() {
+  return `
+// ─── Settings GĐ6 JS ───
+function saveSlackWebhook() {
+  const url = document.getElementById('slackWebhookInput')?.value?.trim();
+  if (!url || !url.startsWith('https://hooks.slack.com/')) {
+    showToast('URL Slack không hợp lệ', 'error'); return;
+  }
+  callApi('setSlackWebhook', { webhookUrl: url }, 
+    () => showToast('✅ Đã lưu Slack webhook', 'success'),
+    err => showToast('❌ Lỗi: ' + err, 'error'));
+}
+
+function testSlack() {
+  callApi('testSlack', {}, 
+    res => showToast(res.success ? '✅ Slack hoạt động!' : '❌ ' + res.error, res.success ? 'success' : 'error'),
+    err => showToast('❌ Lỗi: ' + err, 'error'));
+}
+
+function saveTeamsWebhook() {
+  const url = document.getElementById('teamsWebhookInput')?.value?.trim();
+  if (!url) { showToast('Vui lòng nhập URL', 'error'); return; }
+  callApi('setTeamsWebhook', { webhookUrl: url },
+    () => showToast('✅ Đã lưu Teams webhook', 'success'),
+    err => showToast('❌ ' + err, 'error'));
+}
+
+function saveTelegramConfig() {
+  const token = document.getElementById('tgTokenInput')?.value?.trim();
+  const chatId = document.getElementById('tgChatIdInput')?.value?.trim();
+  if (!token || !chatId) { showToast('Vui lòng nhập đủ Bot Token và Chat ID', 'error'); return; }
+  callApi('setTelegramConfig', { botToken: token, chatId },
+    () => showToast('✅ Đã lưu Telegram config', 'success'),
+    err => showToast('❌ ' + err, 'error'));
+}
+
+function testTelegram() {
+  callApi('testTelegram', {},
+    res => showToast(res.success ? '✅ Telegram hoạt động!' : '❌ ' + res.error, res.success ? 'success' : 'error'),
+    err => showToast('❌ ' + err, 'error'));
+}
+
+function registerTelegramWebhook() {
+  callApi('setTelegramWebhook', {},
+    res => showToast(res.success ? '✅ Webhook đã đăng ký' : '❌ ' + res.description, res.success ? 'success' : 'error'),
+    err => showToast('❌ ' + err, 'error'));
+}
+
+function setupLeaveForm() {
+  callApi('setupLeaveForm', {},
+    res => {
+      if (res.success) {
+        showToast('✅ Đã tạo Form nghỉ phép!', 'success');
+        if (res.formUrl) window.open(res.formUrl, '_blank');
+      } else {
+        showToast('❌ ' + res.error, 'error');
+      }
+    },
+    err => showToast('❌ ' + err, 'error'));
+}
+
+function setupAttendanceForm() {
+  callApi('setupAttendanceForm', {},
+    res => {
+      if (res.success) {
+        showToast('✅ Đã tạo Form chấm công!', 'success');
+        if (res.formUrl) window.open(res.formUrl, '_blank');
+      } else {
+        showToast('❌ ' + res.error, 'error');
+      }
+    },
+    err => showToast('❌ ' + err, 'error'));
+}
+
+function syncBirthdayCalendar() {
+  showToast('Đang sync sinh nhật...', 'info');
+  callApi('bulkBirthdaySync', {},
+    res => showToast(res.success ? '✅ Sync xong! ' + res.created + ' event đã tạo' : '❌ ' + res.error, res.success ? 'success' : 'error'),
+    err => showToast('❌ ' + err, 'error'));
+}
+
+// Dark Mode slider
+function initDarkModeSlider(isDark) {
+  const cb = document.getElementById('darkModeCheckbox');
+  const knob = document.getElementById('darkSliderKnob');
+  const slider = document.getElementById('darkModeToggleSlider');
+  if (!cb) return;
+  cb.checked = isDark;
+  if (isDark) {
+    if (slider) slider.style.background = '#3D35A8';
+    if (knob) knob.style.left = '25px';
+  }
+}
+
+// Override toggleDarkMode để update slider cũng
+const _origToggleDark = window.toggleDarkMode;
+window.toggleDarkMode = function() {
+  _origToggleDark && _origToggleDark();
+  const isDark = document.documentElement.classList.contains('dark-mode');
+  const knob = document.getElementById('darkSliderKnob');
+  const slider = document.getElementById('darkModeToggleSlider');
+  if (slider) slider.style.background = isDark ? '#3D35A8' : '#ccc';
+  if (knob) knob.style.left = isDark ? '25px' : '3px';
+};
+`.trim();
+}
