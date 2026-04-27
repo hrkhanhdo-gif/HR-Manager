@@ -1,0 +1,1711 @@
+// =============================================================================
+// HRIS GIAI ĐOẠN 4 — ONBOARDING & QUẢN LÝ HIỆU SUẤT (KPI)
+// Dán file này vào Apps Script Editor, BÊN DƯỚI các file Giai Đoạn 1, 2, 3
+// Cập nhật: 2026 | Tác giả: HR Analyst System
+// =============================================================================
+// CẤU TRÚC FILE:
+// MODULE 22 — Onboarding: Setup sheet, CRUD task, Welcome email, Probation tracker
+// MODULE 23 — KPI: Setup sheet, CRUD KPI, Tính weighted score, AI suggestions
+// MODULE 24 — handleRequest() mở rộng cho GĐ 4
+// MODULE 25 — UI HTML: Tab Onboarding (Kanban) + Tab KPI (Dashboard)
+// =============================================================================
+
+// ── Thêm vào CONFIG.SHEETS (bổ sung vào CONFIG trong GĐ 1) ──
+// Nếu chưa có, thêm thủ công vào object CONFIG.SHEETS:
+//   ONBOARDING_TASKS: 'ONBOARDING_TASKS',
+//   KPI: 'KPI',
+//   PERFORMANCE_REVIEW: 'PERFORMANCE_REVIEW',
+
+// =============================================================================
+// MODULE 22 — ONBOARDING
+// =============================================================================
+
+/**
+ * Setup sheet ONBOARDING_TASKS
+ */
+function setupOnboardingSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = 'ONBOARDING_TASKS';
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = [
+      'ID_Task', 'ID_NhanSu', 'Ho_Ten_NS', 'Task_Name', 'Category',
+      'Deadline', 'Assignee', 'Status', 'Done_At', 'Note',
+      'Created_At', 'Created_By'
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setBackground('#1D9E75')
+      .setFontColor('#FFFFFF')
+      .setFontWeight('bold');
+    sheet.setFrozenRows(1);
+
+    // Data validation
+    const categoryRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(['HR', 'IT', 'Admin', 'Legal', 'Finance', 'Training'], true).build();
+    sheet.getRange('E2:E2000').setDataValidation(categoryRule);
+
+    const statusRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(['Pending', 'In Progress', 'Done', 'Skip'], true).build();
+    sheet.getRange('H2:H2000').setDataValidation(statusRule);
+
+    const colWidths = [150, 150, 160, 250, 90, 110, 160, 100, 140, 200, 140, 160];
+    colWidths.forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+    Logger.log('✅ Đã tạo sheet ONBOARDING_TASKS');
+  }
+  return sheet;
+}
+
+/**
+ * Tạo checklist onboarding mặc định khi có nhân sự mới
+ * @param {string} nsId - ID nhân sự
+ * @param {string} hoTen - Họ tên nhân sự
+ * @param {string} userEmail - Email người thực hiện
+ */
+function createOnboardingChecklist(nsId, hoTen, userEmail) {
+  const DEFAULT_TASKS = [
+    { name: 'Ký hợp đồng lao động',             category: 'Legal',    days: 1  },
+    { name: 'Cấp thẻ nhân viên & pass cửa',      category: 'Admin',    days: 1  },
+    { name: 'Tạo email công ty',                  category: 'IT',       days: 1  },
+    { name: 'Cấp laptop & thiết bị làm việc',    category: 'IT',       days: 2  },
+    { name: 'Cài đặt phần mềm cần thiết',        category: 'IT',       days: 3  },
+    { name: 'Phổ biến nội quy công ty',           category: 'HR',       days: 2  },
+    { name: 'Training quy trình làm việc',        category: 'Training', days: 5  },
+    { name: 'Giới thiệu team & văn phòng',        category: 'HR',       days: 1  },
+    { name: 'Đăng ký BHXH & phúc lợi',           category: 'Finance',  days: 7  },
+    { name: 'Mở tài khoản ngân hàng nhận lương',  category: 'Finance',  days: 7  },
+    { name: 'Hoàn thiện hồ sơ cá nhân (CMND, bằng cấp)', category: 'HR', days: 5 },
+    { name: 'Đánh giá cuối thử việc 60 ngày',    category: 'HR',       days: 60 },
+  ];
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('ONBOARDING_TASKS') || setupOnboardingSheet();
+  const today = new Date();
+  const rows = [];
+
+  DEFAULT_TASKS.forEach(task => {
+    const id = generateId('OT');
+    const deadline = new Date(today);
+    deadline.setDate(deadline.getDate() + task.days);
+    rows.push([
+      id, nsId, hoTen, task.name, task.category,
+      deadline, '', 'Pending', '', '',
+      today, userEmail || 'system'
+    ]);
+  });
+
+  if (rows.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+  }
+
+  writeAuditLog('CREATE', 'ONBOARDING_TASKS', nsId, '', '', hoTen,
+    `Tạo ${rows.length} task onboarding cho ${hoTen}`);
+
+  return { success: true, count: rows.length };
+}
+
+/**
+ * Lấy danh sách onboarding tasks (có thể lọc theo nsId)
+ */
+function getOnboardingTasks(options) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('ONBOARDING_TASKS');
+  if (!sheet) return [];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  const headers = data[0].map(h => h.toString());
+  let rows = data.slice(1).filter(r => r[0] !== '').map(row => {
+    const obj = {};
+    headers.forEach((h, i) => {
+      obj[h] = row[i] instanceof Date ? row[i].toISOString() : row[i];
+    });
+    return obj;
+  });
+
+  if (options && options.nsId) {
+    rows = rows.filter(r => r['ID_NhanSu'] === options.nsId);
+  }
+
+  return rows;
+}
+
+/**
+ * Cập nhật trạng thái một task onboarding
+ */
+function updateOnboardingTask(data, user) {
+  if (!data.id) return { success: false, error: 'Thiếu ID task' };
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('ONBOARDING_TASKS');
+  if (!sheet) return { success: false, error: 'Sheet ONBOARDING_TASKS không tồn tại' };
+
+  const allData = sheet.getDataRange().getValues();
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][0] === data.id) {
+      const oldStatus = allData[i][7];
+      sheet.getRange(i + 1, 8).setValue(data.status);
+
+      // Ghi thời gian hoàn thành nếu Done
+      if (data.status === 'Done') {
+        sheet.getRange(i + 1, 9).setValue(new Date());
+      } else {
+        sheet.getRange(i + 1, 9).setValue('');
+      }
+
+      if (data.note !== undefined) sheet.getRange(i + 1, 10).setValue(data.note);
+      if (data.assignee !== undefined) sheet.getRange(i + 1, 7).setValue(data.assignee);
+
+      // Màu row theo status
+      const colors = {
+        'Done': '#E1F5EE',
+        'In Progress': '#FAEEDA',
+        'Pending': '#FFFFFF',
+        'Skip': '#F4F4F2'
+      };
+      sheet.getRange(i + 1, 1, 1, allData[0].length)
+        .setBackground(colors[data.status] || '#FFFFFF');
+
+      writeAuditLog('UPDATE', 'ONBOARDING_TASKS', data.id, 'Status',
+        oldStatus, data.status, `Task: ${allData[i][3]}`);
+
+      return { success: true, message: 'Đã cập nhật task' };
+    }
+  }
+  return { success: false, error: 'Không tìm thấy task' };
+}
+
+/**
+ * Thêm task onboarding tùy chỉnh
+ */
+function addOnboardingTask(data, user) {
+  if (!data.id_nhan_su || !data.task_name) {
+    return { success: false, error: 'Thiếu ID nhân sự hoặc tên task' };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('ONBOARDING_TASKS') || setupOnboardingSheet();
+
+  const id = generateId('OT');
+  const deadline = data.deadline ? new Date(data.deadline) : '';
+
+  sheet.appendRow([
+    id, data.id_nhan_su, data.ho_ten_ns || '',
+    data.task_name, data.category || 'HR',
+    deadline, data.assignee || '', 'Pending', '', data.note || '',
+    new Date(), user.email
+  ]);
+
+  writeAuditLog('CREATE', 'ONBOARDING_TASKS', id, '', '', data.task_name,
+    'Thêm task thủ công');
+  return { success: true, id };
+}
+
+/**
+ * Tính % hoàn thành onboarding của một nhân sự
+ */
+function getOnboardingProgress(nsId) {
+  const tasks = getOnboardingTasks({ nsId });
+  if (tasks.length === 0) return { total: 0, done: 0, pct: 0 };
+  const done = tasks.filter(t => t['Status'] === 'Done').length;
+  return {
+    total: tasks.length,
+    done,
+    pct: Math.round((done / tasks.length) * 100)
+  };
+}
+
+/**
+ * Gửi email chào mừng nhân viên mới
+ */
+function sendWelcomeEmail(nsData) {
+  if (!nsData.Email) return;
+  const subject = `🎉 Chào mừng ${nsData.Ho_Ten} gia nhập công ty!`;
+  const body = `Xin chào ${nsData.Ho_Ten},\n\n` +
+    `Chúng tôi rất vui mừng được chào đón bạn vào đội ngũ!\n\n` +
+    `📋 Thông tin của bạn:\n` +
+    `• Bộ phận: ${nsData.Bo_Phan || 'Chưa cập nhật'}\n` +
+    `• Chức vụ: ${nsData.Chuc_Vu || 'Chưa cập nhật'}\n` +
+    `• Ngày vào làm: ${nsData.Ngay_Vao || 'Hôm nay'}\n\n` +
+    `📌 Những việc cần làm trong tuần đầu:\n` +
+    `1. Kiểm tra email và thiết lập mật khẩu\n` +
+    `2. Đọc nội quy công ty\n` +
+    `3. Hoàn thiện hồ sơ nhân sự\n` +
+    `4. Gặp gỡ và làm quen với đồng nghiệp\n\n` +
+    `Mọi thắc mắc, vui lòng liên hệ phòng HR.\n\n` +
+    `Chúc bạn có những ngày làm việc thật vui và hiệu quả! 💪\n\n` +
+    `Trân trọng,\nPhòng Nhân sự`;
+  try {
+    MailApp.sendEmail(nsData.Email, subject, body);
+    Logger.log('✅ Đã gửi welcome email đến ' + nsData.Email);
+  } catch (e) {
+    Logger.log('⚠️ Không gửi được welcome email: ' + e.message);
+  }
+}
+
+/**
+ * Trigger hàng ngày: kiểm tra nhân sự thử việc sắp đến hạn đánh giá (>= 55 ngày)
+ * Setup trigger: Time-driven > Day timer > 8am–9am
+ */
+function runProbationChecker() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('NHAN_SU');
+  if (!sheet) return;
+
+  const data = sheet.getDataRange().getValues();
+  const today = new Date();
+  const alerts = [];
+
+  data.slice(1).forEach((row, i) => {
+    if (row[8] !== 'Thử việc') return; // Chỉ check Thử việc
+    if (!row[4]) return; // Phải có ngày vào
+
+    const ngayVao = new Date(row[4]);
+    const diffDays = Math.floor((today - ngayVao) / (1000 * 60 * 60 * 24));
+
+    // Nhắc khi còn 5 ngày, đúng ngày 60, và quá hạn
+    if (diffDays === 55 || diffDays === 58 || diffDays === 60 || diffDays === 65) {
+      alerts.push({
+        name: row[1],
+        email: row[7],
+        ngayVao: ngayVao,
+        diffDays,
+        id: row[0]
+      });
+    }
+  });
+
+  if (alerts.length === 0) return;
+
+  const adminEmail = CONFIG.NOTIFY.EMAIL_ALERT;
+  let body = `📋 NHẮC NHỞ: Các nhân sự thử việc cần đánh giá\n\n`;
+  alerts.forEach(a => {
+    body += `• ${a.name} (${a.id}) — Ngày ${a.diffDays}/60 thử việc\n`;
+    body += `  Ngày vào: ${Utilities.formatDate(a.ngayVao, 'Asia/Ho_Chi_Minh', 'dd/MM/yyyy')}\n\n`;
+  });
+  body += `\nVui lòng hoàn thành đánh giá kết thúc thử việc đúng hạn.`;
+
+  try {
+    MailApp.sendEmail(adminEmail,
+      `⚠️ [HR] ${alerts.length} nhân sự thử việc sắp đến hạn đánh giá`, body);
+  } catch (e) {
+    Logger.log('⚠️ Probation checker email error: ' + e.message);
+  }
+
+  writeAuditLog('CREATE', 'SYSTEM', 'PROBATION_CHECK', '', '', alerts.length,
+    `Nhắc ${alerts.length} nhân sự sắp hết thử việc`);
+}
+
+// =============================================================================
+// MODULE 23 — KPI MANAGEMENT
+// =============================================================================
+
+/**
+ * Setup sheet KPI
+ */
+function setupKpiSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = 'KPI';
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = [
+      'ID_KPI', 'ID_NhanSu', 'Ho_Ten_NS', 'Bo_Phan', 'Period',
+      'KPI_Name', 'Target', 'Actual', 'Weight', 'Score_Pct',
+      'Status', 'Note', 'Created_At', 'Created_By'
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setBackground('#3D35A8')
+      .setFontColor('#FFFFFF')
+      .setFontWeight('bold');
+    sheet.setFrozenRows(1);
+
+    const statusRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(['Active', 'Completed', 'Cancelled'], true).build();
+    sheet.getRange('K2:K2000').setDataValidation(statusRule);
+
+    const colWidths = [150, 150, 160, 120, 90, 220, 90, 90, 80, 90, 90, 200, 140, 160];
+    colWidths.forEach((w, i) => sheet.setColumnWidth(i + 1, w));
+    Logger.log('✅ Đã tạo sheet KPI');
+  }
+  return sheet;
+}
+
+/**
+ * Setup sheet PERFORMANCE_REVIEW
+ */
+function setupPerformanceReviewSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = 'PERFORMANCE_REVIEW';
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    const headers = [
+      'ID_Review', 'ID_NhanSu', 'Ho_Ten_NS', 'Period',
+      'Self_Score', 'Manager_Score', 'Peer_Score', 'Final_Score',
+      'Self_Comment', 'Manager_Comment', 'Strengths', 'Improvements',
+      'Status', 'Reviewed_By', 'Created_At'
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setBackground('#085041')
+      .setFontColor('#FFFFFF')
+      .setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    Logger.log('✅ Đã tạo sheet PERFORMANCE_REVIEW');
+  }
+  return sheet;
+}
+
+/**
+ * Tạo mới KPI
+ */
+function createKpi(data, user) {
+  if (!data.id_nhan_su || !data.kpi_name) {
+    return { success: false, error: 'Thiếu ID nhân sự hoặc tên KPI' };
+  }
+  if (!data.target || isNaN(parseFloat(data.target))) {
+    return { success: false, error: 'Mục tiêu (Target) phải là số' };
+  }
+  if (!data.weight || isNaN(parseFloat(data.weight))) {
+    return { success: false, error: 'Trọng số (Weight) phải là số' };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('KPI') || setupKpiSheet();
+  const id = generateId('KPI');
+  const period = data.period || getCurrentPeriod();
+  const weight = parseFloat(data.weight);
+  const target = parseFloat(data.target);
+
+  sheet.appendRow([
+    id, data.id_nhan_su, data.ho_ten_ns || '', data.bo_phan || '',
+    period, data.kpi_name, target, '', weight, '',
+    'Active', data.note || '', new Date(), user.email
+  ]);
+
+  writeAuditLog('CREATE', 'KPI', id, '', '', data.kpi_name,
+    `KPI cho ${data.ho_ten_ns} - ${period}`);
+  return { success: true, id };
+}
+
+/**
+ * Cập nhật kết quả thực tế (Actual) của KPI
+ */
+function updateKpiActual(data, user) {
+  if (!data.id) return { success: false, error: 'Thiếu ID KPI' };
+  if (data.actual === undefined || data.actual === '') {
+    return { success: false, error: 'Thiếu giá trị Actual' };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('KPI');
+  if (!sheet) return { success: false, error: 'Sheet KPI không tồn tại' };
+
+  const allData = sheet.getDataRange().getValues();
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][0] === data.id) {
+      const target = parseFloat(allData[i][6]);
+      const actual = parseFloat(data.actual);
+      const scorePct = target > 0 ? Math.round((actual / target) * 100) : 0;
+
+      sheet.getRange(i + 1, 8).setValue(actual);
+      sheet.getRange(i + 1, 10).setValue(scorePct);
+
+      // Màu row theo % đạt
+      const bg = scorePct >= 100 ? '#E1F5EE'
+        : scorePct >= 80 ? '#FAEEDA'
+        : '#FCEBEB';
+      sheet.getRange(i + 1, 1, 1, allData[0].length).setBackground(bg);
+
+      if (data.note) sheet.getRange(i + 1, 12).setValue(data.note);
+
+      writeAuditLog('UPDATE', 'KPI', data.id, 'Actual',
+        allData[i][7], actual, `Score: ${scorePct}%`);
+
+      return { success: true, score_pct: scorePct };
+    }
+  }
+  return { success: false, error: 'Không tìm thấy KPI' };
+}
+
+/**
+ * Lấy danh sách KPI (lọc theo nsId hoặc period)
+ */
+function getKpiList(options) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('KPI');
+  if (!sheet) return [];
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+
+  const headers = data[0].map(h => h.toString());
+  let rows = data.slice(1).filter(r => r[0] !== '').map(row => {
+    const obj = {};
+    headers.forEach((h, i) => {
+      obj[h] = row[i] instanceof Date ? row[i].toISOString() : row[i];
+    });
+    return obj;
+  });
+
+  if (options && options.nsId) {
+    rows = rows.filter(r => r['ID_NhanSu'] === options.nsId);
+  }
+  if (options && options.period) {
+    rows = rows.filter(r => r['Period'] === options.period);
+  }
+  return rows;
+}
+
+/**
+ * Tính tổng KPI score weighted cho một nhân sự trong một kỳ
+ */
+function calcWeightedScore(nsId, period) {
+  const kpis = getKpiList({ nsId, period });
+  if (kpis.length === 0) return { kpis: [], weighted_score: 0, total_weight: 0 };
+
+  let totalWeight = 0;
+  let weightedSum = 0;
+
+  kpis.forEach(k => {
+    const w = parseFloat(k['Weight']) || 0;
+    const s = parseFloat(k['Score_Pct']) || 0;
+    totalWeight += w;
+    weightedSum += w * s;
+  });
+
+  const weightedScore = totalWeight > 0
+    ? Math.round(weightedSum / totalWeight)
+    : 0;
+
+  return { kpis, weighted_score: weightedScore, total_weight: totalWeight };
+}
+
+/**
+ * Lấy summary KPI cho tất cả nhân sự trong kỳ hiện tại
+ */
+function getKpiSummaryAll(period) {
+  const p = period || getCurrentPeriod();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const nsSheet = ss.getSheetByName('NHAN_SU');
+  if (!nsSheet) return [];
+
+  const nsData = nsSheet.getDataRange().getValues().slice(1)
+    .filter(r => r[0] && r[8] !== 'Đã nghỉ');
+
+  return nsData.map(row => {
+    const nsId = row[0];
+    const result = calcWeightedScore(nsId, p);
+    return {
+      ID_NhanSu: nsId,
+      Ho_Ten: row[1],
+      Bo_Phan: row[2],
+      Chuc_Vu: row[3],
+      Period: p,
+      Weighted_Score: result.weighted_score,
+      KPI_Count: result.kpis.length
+    };
+  });
+}
+
+/**
+ * Tạo Performance Review
+ */
+function createPerformanceReview(data, user) {
+  if (!data.id_nhan_su || !data.period) {
+    return { success: false, error: 'Thiếu ID nhân sự hoặc kỳ đánh giá' };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('PERFORMANCE_REVIEW') || setupPerformanceReviewSheet();
+  const id = generateId('PR');
+
+  const selfScore = parseFloat(data.self_score) || 0;
+  const managerScore = parseFloat(data.manager_score) || 0;
+  const peerScore = parseFloat(data.peer_score) || 0;
+  // Trọng số: Self 20%, Manager 60%, Peer 20%
+  const finalScore = Math.round(selfScore * 0.2 + managerScore * 0.6 + peerScore * 0.2);
+
+  sheet.appendRow([
+    id, data.id_nhan_su, data.ho_ten_ns || '', data.period,
+    selfScore, managerScore, peerScore, finalScore,
+    data.self_comment || '', data.manager_comment || '',
+    data.strengths || '', data.improvements || '',
+    'Completed', user.email, new Date()
+  ]);
+
+  writeAuditLog('CREATE', 'PERFORMANCE_REVIEW', id, '', '', data.id_nhan_su,
+    `Review ${data.period} - Score: ${finalScore}`);
+  return { success: true, id, final_score: finalScore };
+}
+
+/**
+ * AI: Gợi ý KPI theo vị trí và bộ phận
+ */
+function aiSuggestKpi(data) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
+  if (!apiKey) return { success: false, error: 'Chưa cài API Key' };
+
+  const prompt = `Bạn là HR consultant chuyên về OKR/KPI.
+Hãy gợi ý 5-7 KPI phù hợp cho nhân viên có vị trí: "${data.chuc_vu || 'Nhân viên'}", bộ phận: "${data.bo_phan || 'Chung'}", kỳ đánh giá: "${data.period || getCurrentPeriod()}".
+
+Trả về JSON hợp lệ (không có text ngoài JSON), format:
+{
+  "kpis": [
+    {
+      "name": "Tên KPI",
+      "description": "Mô tả ngắn cách đo lường",
+      "target_example": "Ví dụ mục tiêu cụ thể",
+      "weight": 0.2,
+      "unit": "%, số, VNĐ, v.v."
+    }
+  ],
+  "note": "Lưu ý tổng thể"
+}
+Tổng weight phải bằng 1.0. Ưu tiên KPI định lượng được.`;
+
+  try {
+    const response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      payload: JSON.stringify({
+        model: 'claude-opus-4-5',
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      muteHttpExceptions: true
+    });
+
+    const result = JSON.parse(response.getContentText());
+    if (result.error) throw new Error(result.error.message);
+
+    const raw = result.content[0].text.trim();
+    const jsonStr = raw.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(jsonStr);
+
+    writeAuditLog('CREATE', 'AI_RESULTS', 'KPI_SUGGEST', '', '',
+      data.chuc_vu, 'AI gợi ý KPI');
+    return { success: true, data: parsed };
+
+  } catch (e) {
+    Logger.log('aiSuggestKpi error: ' + e.message);
+    return { success: false, error: 'AI gặp lỗi: ' + e.message };
+  }
+}
+
+/**
+ * Helper: Lấy kỳ đánh giá hiện tại (Q1/2026 format)
+ */
+function getCurrentPeriod() {
+  const now = new Date();
+  const q = Math.ceil((now.getMonth() + 1) / 3);
+  return `Q${q}/${now.getFullYear()}`;
+}
+
+// =============================================================================
+// MODULE 24 — handleRequest() MỞ RỘNG GĐ 4
+// GHI CHÚ: Thay thế toàn bộ hàm handleRequest() hiện tại bằng hàm này
+// =============================================================================
+
+function handleRequest(request) {
+  const user = getCurrentUser();
+  if (!user.email || !user.role) {
+    return { success: false, error: 'Không có quyền truy cập.' };
+  }
+
+  const { action, payload } = request;
+
+  try {
+    switch (action) {
+      // ═══ GĐ 1 ═══
+      case 'GET_NHAN_SU_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getNhanSuList(user) };
+
+      case 'CREATE_NHAN_SU':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createNhanSu(payload, user);
+
+      case 'UPDATE_NHAN_SU':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateNhanSu(payload, user);
+
+      case 'DELETE_NHAN_SU':
+        if (!hasPermission(user.role, 'DELETE')) throw new Error('Không có quyền');
+        return deleteNhanSu(payload.id, user);
+
+      case 'GET_DASHBOARD_STATS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getDashboardStats(user) };
+
+      case 'GET_AUDIT_LOG':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return { success: true, data: getAuditLog(payload) };
+
+      // ═══ GĐ 2 ═══
+      case 'GET_UNG_VIEN_LIST':
+        return { success: true, data: getUngVienList(user) };
+
+      case 'CREATE_UNG_VIEN':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createUngVien(payload, user);
+
+      case 'UPDATE_UNG_VIEN_STATUS':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateUngVienStatus(payload, user);
+
+      case 'GET_PHONG_VAN_LIST':
+        return { success: true, data: getPhongVanList(user) };
+
+      case 'CREATE_PHONG_VAN':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createPhongVan(payload, user);
+
+      case 'GET_CHART_DATA':
+        return { success: true, data: getChartData(user) };
+
+      case 'GET_SINH_NHAT':
+        return { success: true, data: getSinhNhatTuanNay() };
+
+      // ═══ GĐ 3 ═══
+      case 'AI_CHAT':
+        return aiChat(payload);
+
+      case 'AI_ANALYZE_CV':
+        return aiAnalyzeCV(payload);
+
+      case 'AI_SUMMARIZE_INTERVIEW':
+        return aiSummarizeInterview(payload);
+
+      case 'AI_ANALYZE_TURNOVER':
+        return aiAnalyzeTurnoverRisk();
+
+      case 'AI_GENERATE_JD':
+        return aiGenerateJD(payload);
+
+      // ═══ GĐ 4 — ONBOARDING ═══
+      case 'GET_ONBOARDING_TASKS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getOnboardingTasks(payload) };
+
+      case 'CREATE_ONBOARDING_CHECKLIST':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createOnboardingChecklist(payload.nsId, payload.hoTen, user.email);
+
+      case 'UPDATE_ONBOARDING_TASK':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateOnboardingTask(payload, user);
+
+      case 'ADD_ONBOARDING_TASK':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return addOnboardingTask(payload, user);
+
+      case 'GET_ONBOARDING_PROGRESS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getOnboardingProgress(payload.nsId) };
+
+      // ═══ GĐ 4 — KPI ═══
+      case 'GET_KPI_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getKpiList(payload) };
+
+      case 'CREATE_KPI':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createKpi(payload, user);
+
+      case 'UPDATE_KPI_ACTUAL':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateKpiActual(payload, user);
+
+      case 'GET_KPI_WEIGHTED_SCORE':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: calcWeightedScore(payload.nsId, payload.period) };
+
+      case 'GET_KPI_SUMMARY_ALL':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getKpiSummaryAll(payload && payload.period) };
+
+      case 'CREATE_PERFORMANCE_REVIEW':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createPerformanceReview(payload, user);
+
+      case 'AI_SUGGEST_KPI':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return aiSuggestKpi(payload);
+
+      default:
+        return { success: false, error: 'Action không hợp lệ: ' + action };
+    }
+  } catch (e) {
+    writeAuditLog('ERROR', 'SYSTEM', '', action, '', '', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+// =============================================================================
+// MODULE 25 — SETUP GĐ 4 (chạy 1 lần)
+// =============================================================================
+
+/**
+ * Chạy hàm này để khởi tạo GĐ 4 (chạy SAU khi setupSystem() GĐ 1 đã chạy)
+ */
+function setupGiaiDoan4() {
+  Logger.log('🚀 Khởi tạo GĐ 4 — Onboarding & KPI...');
+
+  setupOnboardingSheet();
+  setupKpiSheet();
+  setupPerformanceReviewSheet();
+  setupGD4Triggers();
+
+  writeAuditLog('CREATE', 'SYSTEM', 'SETUP_GD4', '', '', 'v1.0', 'Khởi tạo Giai đoạn 4');
+  Logger.log('✅ GĐ 4 khởi tạo hoàn tất!');
+
+  try {
+    SpreadsheetApp.getUi().alert(
+      '✅ Giai đoạn 4 đã được khởi tạo!\n\n' +
+      'Đã tạo:\n• Sheet ONBOARDING_TASKS\n• Sheet KPI\n• Sheet PERFORMANCE_REVIEW\n\n' +
+      'Trigger tự động:\n• Probation checker 8am hàng ngày\n\n' +
+      'UI mới:\n• Tab "Onboarding" — Kanban board\n• Tab "KPI & Hiệu suất" — Dashboard\n\n' +
+      'Thêm vào CONFIG.SHEETS trong file GĐ1:\n' +
+      '  ONBOARDING_TASKS: "ONBOARDING_TASKS"\n  KPI: "KPI"\n  PERFORMANCE_REVIEW: "PERFORMANCE_REVIEW"'
+    );
+  } catch (e) {}
+}
+
+/**
+ * Cài đặt triggers GĐ 4
+ */
+function setupGD4Triggers() {
+  // Xóa trigger cũ tránh duplicate
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'runProbationChecker') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  // Probation checker 8am
+  ScriptApp.newTrigger('runProbationChecker')
+    .timeBased().everyDays(1).atHour(8).create();
+
+  Logger.log('✅ Đã cài trigger GĐ 4');
+}
+
+// =============================================================================
+// MODULE 26 — UI HTML: Tab Onboarding + KPI
+// Thêm các hàm này vào buildFullApp() trong GĐ 2 (gọi từ nav sidebar)
+// =============================================================================
+
+/**
+ * Trả về HTML cho tab Onboarding
+ * Gọi hàm này từ JS frontend khi user click nav "Onboarding"
+ */
+function getOnboardingTabHtml() {
+  return `
+<div id="view-onboarding">
+  <div class="topbar">
+    <div>
+      <h2 class="page-title">📋 Onboarding</h2>
+      <p style="color:var(--text-3);font-size:13px;margin:0">Quản lý checklist tiếp nhận nhân viên mới</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <select id="onb-ns-filter" class="form-control" style="width:220px"
+              onchange="loadOnboardingBoard()">
+        <option value="">-- Chọn nhân sự --</option>
+      </select>
+      <button class="btn btn-primary" onclick="openAddTaskModal()">+ Thêm task</button>
+    </div>
+  </div>
+
+  <!-- Progress bar tổng -->
+  <div class="panel" style="margin-bottom:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span id="onb-progress-label" style="font-weight:600;color:var(--text-1)">Chọn nhân sự để xem tiến độ</span>
+      <span id="onb-progress-pct" style="font-size:22px;font-weight:700;color:var(--accent)">—</span>
+    </div>
+    <div style="background:var(--border-color,#E0DDD8);border-radius:8px;height:12px;overflow:hidden">
+      <div id="onb-progress-bar" style="height:100%;background:linear-gradient(90deg,#1D9E75,#3D35A8);
+           border-radius:8px;width:0%;transition:width 0.5s ease"></div>
+    </div>
+    <div style="display:flex;gap:16px;margin-top:10px;font-size:13px;color:var(--text-3)">
+      <span>✅ <span id="onb-done-count">0</span> Hoàn thành</span>
+      <span>🔄 <span id="onb-inprogress-count">0</span> Đang làm</span>
+      <span>⏳ <span id="onb-pending-count">0</span> Chờ xử lý</span>
+      <span>⏭️ <span id="onb-skip-count">0</span> Bỏ qua</span>
+    </div>
+  </div>
+
+  <!-- Kanban Board -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px" id="onb-kanban">
+    ${['Pending','In Progress','Done','Skip'].map(status => `
+      <div class="panel" style="min-height:300px">
+        <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:700;font-size:14px">${
+            status==='Pending'?'⏳ Chờ xử lý':
+            status==='In Progress'?'🔄 Đang làm':
+            status==='Done'?'✅ Hoàn thành':'⏭️ Bỏ qua'
+          }</span>
+          <span class="badge" id="onb-count-${status}" style="background:#eee">0</span>
+        </div>
+        <div class="panel-body" id="onb-col-${status}" style="min-height:200px;display:flex;flex-direction:column;gap:8px">
+          <p style="color:var(--text-3);font-size:13px;text-align:center;margin-top:32px">Không có task</p>
+        </div>
+      </div>
+    `).join('')}
+  </div>
+
+  <!-- Modal Thêm Task -->
+  <div id="modal-add-task" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:460px">
+      <div class="modal-header">
+        <h3>+ Thêm Task Onboarding</h3>
+        <button class="btn-close" onclick="closeModal('modal-add-task')">×</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <div class="form-group">
+          <label>Nhân sự *</label>
+          <select id="at-ns" class="form-control"></select>
+        </div>
+        <div class="form-group">
+          <label>Tên task *</label>
+          <input id="at-name" class="form-control" placeholder="VD: Ký hợp đồng lao động">
+        </div>
+        <div class="form-group">
+          <label>Danh mục</label>
+          <select id="at-category" class="form-control">
+            <option value="HR">HR</option><option value="IT">IT</option>
+            <option value="Admin">Admin</option><option value="Legal">Legal</option>
+            <option value="Finance">Finance</option><option value="Training">Training</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Deadline</label>
+          <input type="date" id="at-deadline" class="form-control">
+        </div>
+        <div class="form-group">
+          <label>Người phụ trách</label>
+          <input id="at-assignee" class="form-control" placeholder="Tên người phụ trách">
+        </div>
+        <div class="form-group">
+          <label>Ghi chú</label>
+          <textarea id="at-note" class="form-control" rows="2"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('modal-add-task')">Huỷ</button>
+        <button class="btn btn-primary" onclick="submitAddTask()">Thêm task</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ──────── ONBOARDING JS ────────
+let _onbTasks = [];
+let _onbNsList = [];
+
+function initOnboarding() {
+  google.script.run.withSuccessHandler(res => {
+    _onbNsList = res.success ? res.data.filter(n => n.Trang_Thai !== 'Đã nghỉ') : [];
+    const sel = document.getElementById('onb-ns-filter');
+    const sel2 = document.getElementById('at-ns');
+    _onbNsList.forEach(ns => {
+      const opt = new Option(ns.Ho_Ten + ' — ' + (ns.Bo_Phan||''), ns.ID_NhanSu);
+      const opt2 = new Option(ns.Ho_Ten + ' — ' + (ns.Bo_Phan||''), ns.ID_NhanSu);
+      sel.appendChild(opt);
+      sel2.appendChild(opt2);
+    });
+  }).handleRequest({ action: 'GET_NHAN_SU_LIST', payload: {} });
+}
+
+function loadOnboardingBoard() {
+  const nsId = document.getElementById('onb-ns-filter').value;
+  if (!nsId) {
+    clearKanban();
+    return;
+  }
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        _onbTasks = res.data;
+        renderKanban();
+        loadProgress(nsId);
+      }
+    })
+    .handleRequest({ action: 'GET_ONBOARDING_TASKS', payload: { nsId } });
+}
+
+function renderKanban() {
+  const statuses = ['Pending','In Progress','Done','Skip'];
+  statuses.forEach(status => {
+    const col = document.getElementById('onb-col-' + status);
+    const badge = document.getElementById('onb-count-' + status);
+    const tasks = _onbTasks.filter(t => t.Status === status);
+    badge.textContent = tasks.length;
+    badge.style.background = status==='Done'?'#1D9E75':status==='In Progress'?'#BA7517':status==='Skip'?'#888':'#3D35A8';
+    badge.style.color = '#fff';
+    if (tasks.length === 0) {
+      col.innerHTML = '<p style="color:var(--text-3);font-size:13px;text-align:center;margin-top:32px;padding:8px">Không có task</p>';
+      return;
+    }
+    col.innerHTML = tasks.map(t => buildTaskCard(t)).join('');
+  });
+}
+
+function buildTaskCard(task) {
+  const dl = task.Deadline ? new Date(task.Deadline) : null;
+  const today = new Date();
+  const isOverdue = dl && task.Status !== 'Done' && dl < today;
+  const dlStr = dl ? dl.toLocaleDateString('vi-VN') : '—';
+  const catColors = {HR:'#EEEDFE',IT:'#E1F5EE',Admin:'#FAEEDA',Legal:'#FCEBEB',Finance:'#E6F1FB',Training:'#F4F4F2'};
+
+  return '<div class="task-card" style="background:#fff;border:1px solid var(--border-color,#E0DDD8);' +
+    'border-radius:10px;padding:12px;cursor:pointer;transition:box-shadow .15s;' +
+    (isOverdue ? 'border-left:3px solid #C0392B;' : '') + '" ' +
+    'onmouseenter="this.style.boxShadow=\'0 4px 16px rgba(0,0,0,.1)\'" ' +
+    'onmouseleave="this.style.boxShadow=\'none\'">' +
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">' +
+    '<span style="font-size:13px;font-weight:600;color:var(--text-1);flex:1">' + escHtml(task.Task_Name) + '</span>' +
+    '<span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;white-space:nowrap;' +
+    'background:' + (catColors[task.Category]||'#eee') + '">' + (task.Category||'') + '</span>' +
+    '</div>' +
+    (task.Assignee ? '<div style="font-size:12px;color:var(--text-3);margin-top:4px">👤 ' + escHtml(task.Assignee) + '</div>' : '') +
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">' +
+    '<span style="font-size:11px;color:' + (isOverdue?'#C0392B':'var(--text-3)') + '">' +
+    (isOverdue ? '🔴 Trễ hạn: ' : '📅 ') + dlStr + '</span>' +
+    '<div style="display:flex;gap:6px">' +
+    buildStatusButtons(task) +
+    '</div>' +
+    '</div>' +
+    '</div>';
+}
+
+function buildStatusButtons(task) {
+  const actions = {
+    'Pending':     [['🔄','In Progress','Bắt đầu'],['⏭️','Skip','Bỏ qua']],
+    'In Progress': [['✅','Done','Hoàn thành'],['⏳','Pending','Hoàn tác'],['⏭️','Skip','Bỏ qua']],
+    'Done':        [['↩️','In Progress','Mở lại']],
+    'Skip':        [['⏳','Pending','Khôi phục']]
+  };
+  return (actions[task.Status]||[]).map(([icon, newStatus, label]) =>
+    '<button title="' + label + '" style="font-size:15px;background:none;border:1px solid #ddd;' +
+    'border-radius:6px;padding:2px 7px;cursor:pointer" ' +
+    'onclick="updateTask(\'' + task.ID_Task + '\',\'' + newStatus + '\')">' + icon + '</button>'
+  ).join('');
+}
+
+function updateTask(taskId, newStatus) {
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        showToast('Đã cập nhật task ✅');
+        loadOnboardingBoard();
+      } else {
+        showToast(res.error, 'error');
+      }
+    })
+    .handleRequest({ action: 'UPDATE_ONBOARDING_TASK', payload: { id: taskId, status: newStatus } });
+}
+
+function loadProgress(nsId) {
+  google.script.run
+    .withSuccessHandler(res => {
+      if (res.success) {
+        const p = res.data;
+        document.getElementById('onb-progress-pct').textContent = p.pct + '%';
+        document.getElementById('onb-progress-bar').style.width = p.pct + '%';
+        document.getElementById('onb-progress-label').textContent =
+          'Tiến độ onboarding: ' + p.done + '/' + p.total + ' task hoàn thành';
+        const counts = { Done: 0, 'In Progress': 0, Pending: 0, Skip: 0 };
+        _onbTasks.forEach(t => { if (counts[t.Status] !== undefined) counts[t.Status]++; });
+        document.getElementById('onb-done-count').textContent = counts.Done;
+        document.getElementById('onb-inprogress-count').textContent = counts['In Progress'];
+        document.getElementById('onb-pending-count').textContent = counts.Pending;
+        document.getElementById('onb-skip-count').textContent = counts.Skip;
+      }
+    })
+    .handleRequest({ action: 'GET_ONBOARDING_PROGRESS', payload: { nsId } });
+}
+
+function openAddTaskModal() {
+  document.getElementById('modal-add-task').style.display = 'flex';
+}
+
+function submitAddTask() {
+  const nsId = document.getElementById('at-ns').value;
+  const name = document.getElementById('at-name').value.trim();
+  if (!nsId) { showToast('Vui lòng chọn nhân sự', 'error'); return; }
+  if (!name) { showToast('Vui lòng nhập tên task', 'error'); return; }
+
+  const nsOpt = document.getElementById('at-ns');
+  const hoTen = nsOpt.options[nsOpt.selectedIndex]?.text?.split('—')[0]?.trim() || '';
+
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        showToast('Đã thêm task ✅');
+        closeModal('modal-add-task');
+        document.getElementById('onb-ns-filter').value = nsId;
+        loadOnboardingBoard();
+      } else {
+        showToast(res.error, 'error');
+      }
+    })
+    .handleRequest({
+      action: 'ADD_ONBOARDING_TASK',
+      payload: {
+        id_nhan_su: nsId, ho_ten_ns: hoTen,
+        task_name: name,
+        category: document.getElementById('at-category').value,
+        deadline: document.getElementById('at-deadline').value,
+        assignee: document.getElementById('at-assignee').value,
+        note: document.getElementById('at-note').value
+      }
+    });
+}
+
+function clearKanban() {
+  ['Pending','In Progress','Done','Skip'].forEach(s => {
+    document.getElementById('onb-col-' + s).innerHTML =
+      '<p style="color:var(--text-3);font-size:13px;text-align:center;margin-top:32px">Không có task</p>';
+    document.getElementById('onb-count-' + s).textContent = '0';
+  });
+  document.getElementById('onb-progress-pct').textContent = '—';
+  document.getElementById('onb-progress-bar').style.width = '0%';
+  document.getElementById('onb-progress-label').textContent = 'Chọn nhân sự để xem tiến độ';
+}
+
+function escHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Tự khởi tạo khi tab được load
+initOnboarding();
+</script>`;
+}
+
+/**
+ * Trả về HTML cho tab KPI & Hiệu suất
+ */
+function getKpiTabHtml() {
+  return `
+<div id="view-kpi">
+  <div class="topbar">
+    <div>
+      <h2 class="page-title">🎯 KPI & Hiệu suất</h2>
+      <p style="color:var(--text-3);font-size:13px;margin:0">Quản lý mục tiêu và đánh giá hiệu suất</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <select id="kpi-period-filter" class="form-control" style="width:130px" onchange="loadKpiDashboard()">
+        <option value="Q1/2026">Q1/2026</option>
+        <option value="Q2/2026" selected>Q2/2026</option>
+        <option value="Q3/2026">Q3/2026</option>
+        <option value="Q4/2026">Q4/2026</option>
+      </select>
+      <button class="btn btn-primary" onclick="openKpiModal('create')">+ Tạo KPI</button>
+      <button class="btn btn-ghost" onclick="openReviewModal()">📊 Đánh giá</button>
+    </div>
+  </div>
+
+  <!-- Summary Cards -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px">
+    <div class="metric-card" style="border-top:3px solid #3D35A8">
+      <div class="metric-label">Tổng KPI đang active</div>
+      <div class="metric-value" id="kpi-total-active" style="color:#3D35A8">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #1D9E75">
+      <div class="metric-label">Đạt ≥ 100%</div>
+      <div class="metric-value" id="kpi-above-100" style="color:#1D9E75">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #BA7517">
+      <div class="metric-label">Đạt 80–99%</div>
+      <div class="metric-value" id="kpi-above-80" style="color:#BA7517">—</div>
+    </div>
+    <div class="metric-card" style="border-top:3px solid #C0392B">
+      <div class="metric-label">Dưới 80%</div>
+      <div class="metric-value" id="kpi-below-80" style="color:#C0392B">—</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px">
+    <!-- Bảng KPI -->
+    <div class="panel">
+      <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Danh sách KPI</span>
+        <div style="display:flex;gap:8px">
+          <select id="kpi-ns-filter" class="form-control" style="width:200px" onchange="loadKpiTable()">
+            <option value="">Tất cả nhân sự</option>
+          </select>
+          <input id="kpi-search" class="form-control" placeholder="🔍 Tìm KPI..."
+                 style="width:160px" oninput="filterKpiTable()">
+        </div>
+      </div>
+      <div class="panel-body" style="padding:0;overflow-x:auto">
+        <table class="data-table" id="kpi-table">
+          <thead>
+            <tr>
+              <th>Nhân sự</th><th>KPI</th><th>Target</th>
+              <th>Actual</th><th>%</th><th>Weight</th><th>Thao tác</th>
+            </tr>
+          </thead>
+          <tbody id="kpi-tbody">
+            <tr><td colspan="7" style="text-align:center;color:var(--text-3);padding:32px">
+              Chọn kỳ để xem KPI</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- AI Suggest + Individual Score -->
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div class="panel">
+        <div class="panel-header">🤖 AI Gợi ý KPI</div>
+        <div class="panel-body">
+          <div class="form-group">
+            <label>Chức vụ</label>
+            <input id="ai-chuc-vu" class="form-control" placeholder="VD: Kỹ sư phần mềm">
+          </div>
+          <div class="form-group">
+            <label>Bộ phận</label>
+            <input id="ai-bo-phan" class="form-control" placeholder="VD: Engineering">
+          </div>
+          <button class="btn btn-primary" style="width:100%;margin-top:4px"
+                  onclick="runAiSuggestKpi()">✨ Gợi ý KPI</button>
+          <div id="ai-kpi-result" style="margin-top:14px;display:none"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">🏆 Điểm KPI cá nhân</div>
+        <div class="panel-body">
+          <select id="score-ns-sel" class="form-control" style="margin-bottom:10px"
+                  onchange="loadIndividualScore()">
+            <option value="">-- Chọn nhân sự --</option>
+          </select>
+          <div id="individual-score-area" style="text-align:center;color:var(--text-3);padding:16px">
+            Chọn nhân sự để xem điểm
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Tạo KPI -->
+  <div id="modal-kpi" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:500px">
+      <div class="modal-header">
+        <h3 id="kpi-modal-title">Tạo KPI mới</h3>
+        <button class="btn-close" onclick="closeModal('modal-kpi')">×</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <div class="form-group">
+          <label>Nhân sự *</label>
+          <select id="kpi-ns-sel" class="form-control"></select>
+        </div>
+        <div class="form-group">
+          <label>Tên KPI *</label>
+          <input id="kpi-name" class="form-control" placeholder="VD: Doanh thu tháng">
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Kỳ đánh giá</label>
+            <input id="kpi-period" class="form-control" placeholder="Q2/2026">
+          </div>
+          <div class="form-group">
+            <label>Mục tiêu (Target) *</label>
+            <input id="kpi-target" type="number" class="form-control" placeholder="100">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Trọng số (0–1) *</label>
+            <input id="kpi-weight" type="number" step="0.05" min="0" max="1"
+                   class="form-control" placeholder="0.3">
+          </div>
+          <div class="form-group">
+            <label>Kết quả thực tế</label>
+            <input id="kpi-actual" type="number" class="form-control" placeholder="Để trống">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Ghi chú</label>
+          <textarea id="kpi-note" class="form-control" rows="2"
+                    placeholder="Mô tả cách đo lường..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('modal-kpi')">Huỷ</button>
+        <button class="btn btn-primary" onclick="submitCreateKpi()">Lưu KPI</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Cập nhật Actual -->
+  <div id="modal-update-actual" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:380px">
+      <div class="modal-header">
+        <h3>Cập nhật kết quả thực tế</h3>
+        <button class="btn-close" onclick="closeModal('modal-update-actual')">×</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
+        <p id="update-kpi-name" style="font-weight:600;color:var(--text-1)"></p>
+        <div class="form-group">
+          <label>Kết quả Actual *</label>
+          <input id="update-actual-val" type="number" class="form-control">
+        </div>
+        <div class="form-group">
+          <label>Ghi chú</label>
+          <input id="update-actual-note" class="form-control">
+        </div>
+        <input type="hidden" id="update-kpi-id">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('modal-update-actual')">Huỷ</button>
+        <button class="btn btn-primary" onclick="submitUpdateActual()">Cập nhật</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Performance Review -->
+  <div id="modal-review" class="modal" style="display:none">
+    <div class="modal-content" style="max-width:560px">
+      <div class="modal-header">
+        <h3>📊 Đánh giá Hiệu suất (360°)</h3>
+        <button class="btn-close" onclick="closeModal('modal-review')">×</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Nhân sự *</label>
+            <select id="rv-ns" class="form-control"></select>
+          </div>
+          <div class="form-group">
+            <label>Kỳ đánh giá *</label>
+            <input id="rv-period" class="form-control" placeholder="Q2/2026">
+          </div>
+        </div>
+        <div style="background:#F4F4F2;border-radius:10px;padding:14px">
+          <p style="font-size:12px;color:var(--text-3);margin:0 0 10px">
+            Trọng số: Tự đánh giá 20% | Quản lý 60% | Đồng nghiệp 20%</p>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+            <div class="form-group">
+              <label>Tự đánh giá (0–100)</label>
+              <input id="rv-self" type="number" class="form-control" min="0" max="100">
+            </div>
+            <div class="form-group">
+              <label>Quản lý (0–100)</label>
+              <input id="rv-manager" type="number" class="form-control" min="0" max="100">
+            </div>
+            <div class="form-group">
+              <label>Đồng nghiệp (0–100)</label>
+              <input id="rv-peer" type="number" class="form-control" min="0" max="100" placeholder="Để trống nếu không có">
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Nhận xét tự đánh giá</label>
+          <textarea id="rv-self-comment" class="form-control" rows="2"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Nhận xét quản lý</label>
+          <textarea id="rv-manager-comment" class="form-control" rows="2"></textarea>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group">
+            <label>Điểm mạnh</label>
+            <textarea id="rv-strengths" class="form-control" rows="2"></textarea>
+          </div>
+          <div class="form-group">
+            <label>Cần cải thiện</label>
+            <textarea id="rv-improvements" class="form-control" rows="2"></textarea>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('modal-review')">Huỷ</button>
+        <button class="btn btn-primary" onclick="submitReview()">Lưu đánh giá</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ──────── KPI JS ────────
+let _kpiData = [];
+let _kpiNsList = [];
+let _currentKpiId = null;
+
+function initKpi() {
+  google.script.run.withSuccessHandler(res => {
+    _kpiNsList = res.success ? res.data.filter(n => n.Trang_Thai !== 'Đã nghỉ') : [];
+    ['kpi-ns-filter','kpi-ns-sel','score-ns-sel','rv-ns'].forEach(selId => {
+      const sel = document.getElementById(selId);
+      if (!sel) return;
+      _kpiNsList.forEach(ns => {
+        sel.appendChild(new Option(ns.Ho_Ten + ' (' + (ns.Bo_Phan||'') + ')', ns.ID_NhanSu));
+      });
+    });
+    // Set default period
+    const period = document.getElementById('kpi-period');
+    if (period) period.value = 'Q2/2026';
+    const rv = document.getElementById('rv-period');
+    if (rv) rv.value = 'Q2/2026';
+
+    loadKpiDashboard();
+  }).handleRequest({ action: 'GET_NHAN_SU_LIST', payload: {} });
+}
+
+function loadKpiDashboard() {
+  const period = document.getElementById('kpi-period-filter').value;
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (!res.success) return;
+      _kpiData = res.data;
+      updateKpiCards();
+      loadKpiTable();
+    })
+    .handleRequest({ action: 'GET_KPI_LIST', payload: { period } });
+}
+
+function updateKpiCards() {
+  const active = _kpiData.filter(k => k.Status === 'Active').length;
+  const above100 = _kpiData.filter(k => parseFloat(k.Score_Pct) >= 100).length;
+  const above80 = _kpiData.filter(k => {
+    const s = parseFloat(k.Score_Pct);
+    return s >= 80 && s < 100;
+  }).length;
+  const below80 = _kpiData.filter(k => k.Score_Pct !== '' && parseFloat(k.Score_Pct) < 80).length;
+
+  document.getElementById('kpi-total-active').textContent = active;
+  document.getElementById('kpi-above-100').textContent = above100;
+  document.getElementById('kpi-above-80').textContent = above80;
+  document.getElementById('kpi-below-80').textContent = below80;
+}
+
+function loadKpiTable() {
+  const nsFilter = document.getElementById('kpi-ns-filter').value;
+  let data = nsFilter ? _kpiData.filter(k => k.ID_NhanSu === nsFilter) : _kpiData;
+
+  const tbody = document.getElementById('kpi-tbody');
+  if (data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-3);padding:32px">Không có KPI nào</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.map(k => {
+    const score = k.Score_Pct !== '' ? parseFloat(k.Score_Pct) : null;
+    const scoreBg = score === null ? '' : score >= 100 ? '#E1F5EE' : score >= 80 ? '#FAEEDA' : '#FCEBEB';
+    const scoreColor = score === null ? '#888' : score >= 100 ? '#1D9E75' : score >= 80 ? '#BA7517' : '#C0392B';
+    const scoreText = score !== null ? score + '%' : '—';
+
+    return '<tr>' +
+      '<td><span style="font-weight:600">' + escHtml(k.Ho_Ten_NS) + '</span><br>' +
+      '<small style="color:var(--text-3)">' + escHtml(k.Bo_Phan||'') + '</small></td>' +
+      '<td>' + escHtml(k.KPI_Name) + '</td>' +
+      '<td style="text-align:right">' + (k.Target||'—') + '</td>' +
+      '<td style="text-align:right">' + (k.Actual !== '' ? k.Actual : '—') + '</td>' +
+      '<td style="text-align:center"><span style="background:' + scoreBg + ';color:' + scoreColor +
+        ';font-weight:700;padding:3px 10px;border-radius:20px;font-size:13px">' + scoreText + '</span></td>' +
+      '<td style="text-align:center">' + (k.Weight||'') + '</td>' +
+      '<td><button class="btn btn-ghost" style="font-size:12px;padding:4px 10px" ' +
+        'onclick="openUpdateActual(\'' + k.ID_KPI + '\',\'' + escHtml(k.KPI_Name) + '\')">Nhập kết quả</button></td>' +
+      '</tr>';
+  }).join('');
+}
+
+function filterKpiTable() {
+  const q = document.getElementById('kpi-search').value.toLowerCase();
+  document.querySelectorAll('#kpi-tbody tr').forEach(tr => {
+    tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+
+function openKpiModal(mode) {
+  document.getElementById('kpi-modal-title').textContent = 'Tạo KPI mới';
+  ['kpi-name','kpi-target','kpi-actual','kpi-note'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  document.getElementById('kpi-weight').value = '0.2';
+  document.getElementById('kpi-period').value = document.getElementById('kpi-period-filter').value;
+  document.getElementById('modal-kpi').style.display = 'flex';
+}
+
+function openUpdateActual(kpiId, kpiName) {
+  _currentKpiId = kpiId;
+  document.getElementById('update-kpi-id').value = kpiId;
+  document.getElementById('update-kpi-name').textContent = kpiName;
+  document.getElementById('update-actual-val').value = '';
+  document.getElementById('update-actual-note').value = '';
+  document.getElementById('modal-update-actual').style.display = 'flex';
+}
+
+function openReviewModal() {
+  document.getElementById('modal-review').style.display = 'flex';
+}
+
+function submitCreateKpi() {
+  const nsEl = document.getElementById('kpi-ns-sel');
+  const nsId = nsEl.value;
+  const hoTen = nsEl.options[nsEl.selectedIndex]?.text?.split('(')[0]?.trim() || '';
+  const boPhan = nsEl.options[nsEl.selectedIndex]?.text?.match(/\(([^)]+)\)/)?.[1] || '';
+  const name = document.getElementById('kpi-name').value.trim();
+  const target = document.getElementById('kpi-target').value;
+  const weight = document.getElementById('kpi-weight').value;
+
+  if (!nsId || !name || !target || !weight) {
+    showToast('Vui lòng điền đầy đủ thông tin bắt buộc', 'error'); return;
+  }
+
+  showLoading();
+  const payload = {
+    id_nhan_su: nsId, ho_ten_ns: hoTen, bo_phan: boPhan,
+    kpi_name: name,
+    period: document.getElementById('kpi-period').value || document.getElementById('kpi-period-filter').value,
+    target: parseFloat(target), weight: parseFloat(weight),
+    note: document.getElementById('kpi-note').value
+  };
+
+  const actual = document.getElementById('kpi-actual').value;
+  if (actual !== '') payload.actual = parseFloat(actual);
+
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        showToast('Đã tạo KPI ✅');
+        closeModal('modal-kpi');
+        loadKpiDashboard();
+      } else { showToast(res.error, 'error'); }
+    })
+    .handleRequest({ action: 'CREATE_KPI', payload });
+}
+
+function submitUpdateActual() {
+  const kpiId = document.getElementById('update-kpi-id').value;
+  const actual = document.getElementById('update-actual-val').value;
+  if (!actual && actual !== 0) { showToast('Vui lòng nhập kết quả Actual', 'error'); return; }
+
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        showToast('Đã cập nhật! Điểm: ' + res.score_pct + '%');
+        closeModal('modal-update-actual');
+        loadKpiDashboard();
+      } else { showToast(res.error, 'error'); }
+    })
+    .handleRequest({
+      action: 'UPDATE_KPI_ACTUAL',
+      payload: {
+        id: kpiId, actual: parseFloat(actual),
+        note: document.getElementById('update-actual-note').value
+      }
+    });
+}
+
+function submitReview() {
+  const nsEl = document.getElementById('rv-ns');
+  const nsId = nsEl.value;
+  const hoTen = nsEl.options[nsEl.selectedIndex]?.text?.split('(')[0]?.trim() || '';
+  const period = document.getElementById('rv-period').value.trim();
+  if (!nsId || !period) { showToast('Vui lòng chọn nhân sự và kỳ đánh giá', 'error'); return; }
+
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (res.success) {
+        showToast('Đã lưu đánh giá! Điểm tổng: ' + res.final_score + ' ✅');
+        closeModal('modal-review');
+      } else { showToast(res.error, 'error'); }
+    })
+    .handleRequest({
+      action: 'CREATE_PERFORMANCE_REVIEW',
+      payload: {
+        id_nhan_su: nsId, ho_ten_ns: hoTen, period,
+        self_score: document.getElementById('rv-self').value,
+        manager_score: document.getElementById('rv-manager').value,
+        peer_score: document.getElementById('rv-peer').value || 0,
+        self_comment: document.getElementById('rv-self-comment').value,
+        manager_comment: document.getElementById('rv-manager-comment').value,
+        strengths: document.getElementById('rv-strengths').value,
+        improvements: document.getElementById('rv-improvements').value
+      }
+    });
+}
+
+function loadIndividualScore() {
+  const nsId = document.getElementById('score-ns-sel').value;
+  const period = document.getElementById('kpi-period-filter').value;
+  if (!nsId) return;
+
+  google.script.run
+    .withSuccessHandler(res => {
+      if (!res.success) return;
+      const d = res.data;
+      const scoreColor = d.weighted_score >= 100 ? '#1D9E75'
+        : d.weighted_score >= 80 ? '#BA7517' : '#C0392B';
+      const area = document.getElementById('individual-score-area');
+      if (d.kpis.length === 0) {
+        area.innerHTML = '<p style="color:var(--text-3)">Chưa có KPI nào trong kỳ ' + period + '</p>';
+        return;
+      }
+      area.innerHTML =
+        '<div style="font-size:48px;font-weight:800;color:' + scoreColor + '">' +
+          d.weighted_score + '%</div>' +
+        '<div style="color:var(--text-3);font-size:13px;margin-bottom:14px">Điểm KPI weighted trung bình</div>' +
+        '<div style="display:flex;flex-direction:column;gap:6px">' +
+        d.kpis.map(k => {
+          const s = parseFloat(k.Score_Pct)||0;
+          const bg = s>=100?'#E1F5EE':s>=80?'#FAEEDA':'#FCEBEB';
+          const c = s>=100?'#1D9E75':s>=80?'#BA7517':'#C0392B';
+          return '<div style="display:flex;justify-content:space-between;align-items:center;' +
+            'padding:6px 10px;background:#F7F6F3;border-radius:8px;font-size:13px">' +
+            '<span style="flex:1;text-align:left">' + escHtml(k.KPI_Name) + '</span>' +
+            '<span style="font-weight:700;color:' + c + ';background:' + bg +
+              ';padding:2px 8px;border-radius:12px;font-size:12px">' +
+              (k.Score_Pct !== '' ? k.Score_Pct + '%' : '—') + '</span>' +
+            '</div>';
+        }).join('') +
+        '</div>';
+    })
+    .handleRequest({ action: 'GET_KPI_WEIGHTED_SCORE', payload: { nsId, period } });
+}
+
+function runAiSuggestKpi() {
+  const chucVu = document.getElementById('ai-chuc-vu').value.trim();
+  const boPhan = document.getElementById('ai-bo-phan').value.trim();
+  if (!chucVu) { showToast('Vui lòng nhập chức vụ', 'error'); return; }
+
+  const resultDiv = document.getElementById('ai-kpi-result');
+  resultDiv.style.display = 'block';
+  resultDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-3)">✨ AI đang phân tích...</div>';
+
+  google.script.run
+    .withSuccessHandler(res => {
+      if (!res.success) {
+        resultDiv.innerHTML = '<p style="color:#C0392B">Lỗi: ' + res.error + '</p>';
+        return;
+      }
+      const d = res.data;
+      resultDiv.innerHTML =
+        '<p style="font-size:12px;color:var(--text-3);margin:0 0 10px">' + (d.note||'') + '</p>' +
+        d.kpis.map(k =>
+          '<div style="background:#F7F6F3;border-radius:8px;padding:10px;margin-bottom:8px">' +
+          '<div style="font-weight:600;font-size:13px">' + escHtml(k.name) + ' <span style="font-size:11px;' +
+            'color:#3D35A8;background:#EEEDFE;padding:1px 7px;border-radius:10px">W:' + k.weight + '</span></div>' +
+          '<div style="font-size:12px;color:var(--text-3);margin:3px 0">' + escHtml(k.description) + '</div>' +
+          '<div style="font-size:12px;color:#1D9E75">🎯 ' + escHtml(k.target_example) + '</div>' +
+          '<button onclick="prefillKpiFromSuggest(\'' + escHtml(k.name).replace(/'/g,"\\'")+'\','+k.weight+')" ' +
+            'style="font-size:11px;margin-top:6px;background:#3D35A8;color:#fff;border:none;' +
+            'border-radius:6px;padding:3px 10px;cursor:pointer">+ Thêm KPI này</button>' +
+          '</div>'
+        ).join('');
+    })
+    .handleRequest({
+      action: 'AI_SUGGEST_KPI',
+      payload: {
+        chuc_vu: chucVu, bo_phan: boPhan,
+        period: document.getElementById('kpi-period-filter').value
+      }
+    });
+}
+
+function prefillKpiFromSuggest(name, weight) {
+  document.getElementById('kpi-name').value = name;
+  document.getElementById('kpi-weight').value = weight;
+  document.getElementById('modal-kpi').style.display = 'flex';
+}
+
+function escHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+initKpi();
+</script>`;
+}
+
+/**
+ * Helper để tích hợp tab GĐ4 vào buildFullApp() của GĐ2
+ * Thêm 2 case này vào switch(page) trong buildFullApp():
+ *
+ *   case 'onboarding':
+ *     contentHtml = getOnboardingTabHtml();
+ *     break;
+ *   case 'kpi':
+ *     contentHtml = getKpiTabHtml();
+ *     break;
+ *
+ * Và thêm 2 nav item vào sidebar HTML của GĐ2:
+ *
+ *   <a class="nav-item ${page==='onboarding'?'active':''}" onclick="navigate('onboarding')">
+ *     📋 Onboarding
+ *   </a>
+ *   <a class="nav-item ${page==='kpi'?'active':''}" onclick="navigate('kpi')">
+ *     🎯 KPI & Hiệu suất
+ *   </a>
+ */
+function buildMainApp_GD4_NavItems(page) {
+  // Trả về HTML nav items để nhúng vào sidebar GĐ2
+  return `
+    <a class="nav-item ${page === 'onboarding' ? 'active' : ''}" onclick="navigate('onboarding')" style="cursor:pointer">
+      📋 Onboarding
+    </a>
+    <a class="nav-item ${page === 'kpi' ? 'active' : ''}" onclick="navigate('kpi')" style="cursor:pointer">
+      🎯 KPI & Hiệu suất
+    </a>`;
+}
+
+/**
+ * Override getDashboardStats để bổ sung stats GĐ4
+ * (Tích hợp vào getDashboardStats() của GĐ 1)
+ */
+function getDashboardStats_GD4_Extra(user) {
+  const stats = {};
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // Onboarding stats
+    const obSheet = ss.getSheetByName('ONBOARDING_TASKS');
+    if (obSheet) {
+      const obData = obSheet.getDataRange().getValues().slice(1).filter(r => r[0]);
+      stats.onboarding_pending = obData.filter(r => r[7] === 'Pending').length;
+      stats.onboarding_done = obData.filter(r => r[7] === 'Done').length;
+    }
+
+    // KPI stats kỳ hiện tại
+    const kpiSheet = ss.getSheetByName('KPI');
+    if (kpiSheet) {
+      const period = getCurrentPeriod();
+      const kpiData = kpiSheet.getDataRange().getValues().slice(1)
+        .filter(r => r[0] && r[4] === period && r[10] === 'Active');
+      stats.kpi_active_count = kpiData.length;
+      const scored = kpiData.filter(r => r[9] !== '' && r[9] !== null);
+      stats.kpi_avg_score = scored.length > 0
+        ? Math.round(scored.reduce((s, r) => s + parseFloat(r[9] || 0), 0) / scored.length)
+        : 0;
+    }
+  } catch (e) {
+    Logger.log('getDashboardStats_GD4_Extra error: ' + e.message);
+  }
+  return stats;
+}
