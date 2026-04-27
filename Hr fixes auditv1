@@ -1,0 +1,1346 @@
+// =============================================================================
+// HRIS — AUDIT FIX FILE v1.0
+// Senior Dev fixes dựa trên Code Audit Report tháng 04/2026
+// Dán file này vào Apps Script Editor, BÊN DƯỚI tất cả file GĐ1–GĐ6
+// =============================================================================
+// FIXES INCLUDED:
+//   [B-02] CRITICAL — handleRequest() duplicate → 1 master switch
+//   [B-01] CRITICAL — setupSystem() idempotency guard
+//   [B-05] HIGH     — XSS escapeHtml() áp dụng rộng
+//   [B-11] HIGH     — Optimistic locking concurrent write
+//   [B-14] CRITICAL — Unit tests cơ bản (Hr_Tests)
+//   [B-07] MEDIUM   — Cache buildHrContext() 5 phút
+//   [B-03] MEDIUM   — updateNhanSu() batch setValues()
+//   [B-06] MEDIUM   — callClaude() retry với backoff
+//   [B-17] MEDIUM   — countWorkDays() trừ ngày lễ quốc gia VN
+//   [B-12] MEDIUM   — generateId() dùng LockService tránh collision
+//   [B-18] LOW      — createKpi() validate tổng weight ≤ 1.0
+//   [GĐ2] P1        — Edit nhân sự modal prefill
+//   [GĐ2] P2        — Advanced filter bộ phận + trạng thái
+//   [GĐ3] P1        — Interview summary UI nối backend
+// =============================================================================
+
+
+// =============================================================================
+// FIX B-02: MỘT handleRequest() DUY NHẤT — MASTER ROUTER
+// Xóa TẤT CẢ hàm handleRequest() ở các file GĐ1, GĐ2, GĐ4, GĐ5
+// Chỉ giữ file này làm source of truth
+// =============================================================================
+
+function handleRequest(request) {
+  const user = getCurrentUser();
+  if (!user.email || !user.role) {
+    return { success: false, error: 'Không có quyền truy cập. Vui lòng đăng nhập bằng tài khoản công ty.' };
+  }
+
+  const { action, payload } = request;
+
+  try {
+    switch (action) {
+
+      // ═══════════════════════════════════════
+      // GĐ1 — CƠ BẢN
+      // ═══════════════════════════════════════
+      case 'GET_NHAN_SU_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền xem danh sách nhân sự');
+        return { success: true, data: getNhanSuList(user) };
+
+      case 'CREATE_NHAN_SU':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền thêm nhân sự');
+        return createNhanSu(payload, user);
+
+      case 'UPDATE_NHAN_SU':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền sửa nhân sự');
+        return updateNhanSu_fixed(payload, user); // [B-03] dùng phiên bản đã fix
+
+      case 'DELETE_NHAN_SU':
+        if (!hasPermission(user.role, 'DELETE')) throw new Error('Không có quyền xóa nhân sự');
+        return deleteNhanSu(payload.id, user);
+
+      case 'GET_AUDIT_LOG':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin mới xem được Audit Log');
+        return { success: true, data: getAuditLog(payload) };
+
+      case 'GET_DASHBOARD_STATS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền xem báo cáo');
+        return { success: true, data: getDashboardStats(user) };
+
+      // ═══════════════════════════════════════
+      // GĐ2 — TUYỂN DỤNG & PHỎNG VẤN
+      // ═══════════════════════════════════════
+      case 'GET_UNG_VIEN_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getUngVienList(user) };
+
+      case 'CREATE_UNG_VIEN':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createUngVien(payload, user);
+
+      case 'UPDATE_UNG_VIEN_STATUS':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateUngVienStatus(payload, user);
+
+      case 'GET_PHONG_VAN_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getPhongVanList(user) };
+
+      case 'CREATE_PHONG_VAN':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createPhongVan(payload, user);
+
+      case 'GET_CHART_DATA':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getChartData(user) };
+
+      case 'GET_SINH_NHAT':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getSinhNhatTuanNay() };
+
+      // [GĐ2-FIX] Edit nhân sự — lấy data để prefill form
+      case 'GET_NHAN_SU_BY_ID':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return getNhanSuById(payload.id);
+
+      // [GĐ2-FIX] Advanced filter
+      case 'GET_NHAN_SU_FILTERED':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getNhanSuFiltered(payload, user) };
+
+      // ═══════════════════════════════════════
+      // GĐ3 — AI
+      // ═══════════════════════════════════════
+      case 'AI_CHAT':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return chatWithHr(payload.message, payload.history);
+
+      case 'AI_ANALYZE_CV':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return analyzeCv(payload.uvId, payload.jdText, payload.cvText);
+
+      case 'AI_SUMMARIZE_INTERVIEW':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return summarizeInterview(payload.pvId, payload.notes, payload.uvName, payload.vitri);
+
+      case 'AI_TURNOVER_RISK':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return analyzeTurnoverRisk();
+
+      case 'AI_GENERATE_JD':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return generateJobDescription(payload);
+
+      // ═══════════════════════════════════════
+      // GĐ4 — ONBOARDING & KPI
+      // ═══════════════════════════════════════
+      case 'GET_ONBOARDING_TASKS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getOnboardingTasks(payload) };
+
+      case 'CREATE_ONBOARDING_CHECKLIST':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createOnboardingChecklist(payload.nsId, payload.hoTen, user.email);
+
+      case 'UPDATE_ONBOARDING_TASK':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateOnboardingTask(payload, user);
+
+      case 'ADD_ONBOARDING_TASK':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return addOnboardingTask(payload, user);
+
+      case 'GET_ONBOARDING_PROGRESS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getOnboardingProgress(payload.nsId) };
+
+      case 'GET_KPI_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getKpiList(payload) };
+
+      case 'CREATE_KPI':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createKpi_fixed(payload, user); // [B-18] dùng phiên bản đã fix
+
+      case 'UPDATE_KPI_ACTUAL':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updateKpiActual(payload, user);
+
+      case 'GET_KPI_WEIGHTED_SCORE':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: calcWeightedScore(payload.nsId, payload.period) };
+
+      case 'GET_KPI_SUMMARY_ALL':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getKpiSummaryAll(payload && payload.period) };
+
+      case 'CREATE_PERFORMANCE_REVIEW':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createPerformanceReview(payload, user);
+
+      case 'AI_SUGGEST_KPI':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return aiSuggestKpi(payload);
+
+      // ═══════════════════════════════════════
+      // GĐ5 — PAYROLL, LEAVE, REPORTS
+      // ═══════════════════════════════════════
+      case 'GET_PAYROLL_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getPayrollList(payload) };
+
+      case 'CREATE_PAYROLL':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createPayroll(payload, user);
+
+      case 'UPDATE_PAYROLL':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updatePayrollRecord(payload, user);
+
+      case 'UPDATE_PAYROLL_STATUS':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return updatePayrollStatus(payload, user);
+
+      case 'RUN_BATCH_PAYROLL':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return runBatchPayroll(payload.period, user);
+
+      case 'SEND_PAYSLIP':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return sendPayslip(payload.id, user);
+
+      case 'EXPORT_PAYROLL_CSV':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return exportPayrollCsv(payload.period);
+
+      case 'CALC_SALARY_PREVIEW':
+        return { success: true, data: calcSalary(payload) };
+
+      case 'GET_LEAVE_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getLeaveList(payload) };
+
+      case 'CREATE_LEAVE_REQUEST':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return createLeaveRequest(payload, user);
+
+      case 'PROCESS_LEAVE_REQUEST':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return processLeaveRequest(payload, user);
+
+      case 'GET_LEAVE_BALANCE':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getLeaveBalance(payload.nsId, payload.year || new Date().getFullYear()) };
+
+      case 'GET_ATTENDANCE_LIST':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: getAttendanceList(payload) };
+
+      case 'UPSERT_ATTENDANCE':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return upsertAttendance(payload, user);
+
+      case 'GET_MONTHLY_REPORT':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: buildMonthlyHrReport(payload && payload.period) };
+
+      case 'GET_TURNOVER_REPORT':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return { success: true, data: buildTurnoverReport(payload && payload.year) };
+
+      case 'AI_PAYROLL_INSIGHTS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return aiPayrollInsights(payload && payload.period);
+
+      // ═══════════════════════════════════════
+      // GĐ6 — PWA, INTEGRATIONS
+      // ═══════════════════════════════════════
+      case 'GET_ACTIVITY_FEED':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return getActivityFeed(payload && payload.limit);
+
+      case 'GET_UNREAD_NOTIFICATIONS':
+        if (!hasPermission(user.role, 'READ')) throw new Error('Không có quyền');
+        return getUnreadNotifications();
+
+      case 'MARK_NOTIFICATIONS_READ':
+        return markNotificationsRead();
+
+      case 'GET_USER_PREFERENCES':
+        return getUserPreferences();
+
+      case 'SET_LANGUAGE':
+        return setUserLanguageAndGetPrefs(payload.lang);
+
+      case 'SET_DARK_MODE':
+        return setUserDarkMode(user.email, payload.isDark);
+
+      case 'APPROVE_LEAVE':
+        if (!hasPermission(user.role, 'WRITE')) throw new Error('Không có quyền');
+        return approveLeaveRequest(payload.leaveId, payload.action, user.email);
+
+      case 'TEST_SLACK':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return sendSlackMessage_('🧪 Test từ HRIS — ' + new Date().toLocaleString('vi-VN'), 'general');
+
+      case 'TEST_TELEGRAM':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return sendTelegramMessage_('🧪 <b>Test từ HRIS</b>\n' + new Date().toLocaleString('vi-VN'));
+
+      case 'SETUP_LEAVE_FORM':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return setupLeaveRequestForm();
+
+      case 'SETUP_ATTENDANCE_FORM':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return setupAttendanceForm();
+
+      case 'SET_SLACK_WEBHOOK':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return setSlackWebhook(payload.webhookUrl);
+
+      case 'SET_TEAMS_WEBHOOK':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return setTeamsWebhook(payload.webhookUrl);
+
+      case 'SET_TELEGRAM_CONFIG':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return setTelegramConfig(payload.botToken, payload.chatId);
+
+      case 'SET_TELEGRAM_WEBHOOK':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return setTelegramWebhook();
+
+      case 'BULK_BIRTHDAY_SYNC':
+        if (!hasPermission(user.role, 'ADMIN')) throw new Error('Chỉ Admin');
+        return runBulkBirthdayCalendarSync();
+
+      // ═══════════════════════════════════════
+      // DEFAULT
+      // ═══════════════════════════════════════
+      default:
+        writeAuditLog('ERROR', 'SYSTEM', '', action, '', '', 'Action không hợp lệ');
+        return { success: false, error: 'Action không hợp lệ: ' + action };
+    }
+  } catch (e) {
+    writeAuditLog('ERROR', 'SYSTEM', '', action, '', '', e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+
+// =============================================================================
+// FIX B-01: setupSystem() IDEMPOTENT GUARD
+// Thay thế hoàn toàn hàm setupSystem() trong GĐ1
+// =============================================================================
+
+function setupSystem() {
+  const props = PropertiesService.getScriptProperties();
+
+  // Guard: đã init rồi thì chỉ thông báo, không chạy lại
+  const alreadyInit = props.getProperty('SYSTEM_INITIALIZED');
+  if (alreadyInit === 'true') {
+    try {
+      SpreadsheetApp.getUi().alert(
+        'ℹ️ Hệ thống đã được khởi tạo trước đó.\n\n' +
+        'Nếu bạn muốn reset hoàn toàn, hãy chạy hàm resetSystem() trước.\n\n' +
+        'Để cập nhật triggers, hãy chạy setupTriggers_safe().'
+      );
+    } catch (e) {}
+    Logger.log('ℹ️ setupSystem() đã chạy trước đó — bỏ qua.');
+    return;
+  }
+
+  Logger.log('🚀 Bắt đầu khởi tạo hệ thống HR lần đầu...');
+
+  // 1. Tạo sheets (idempotent — chỉ tạo nếu chưa có)
+  setupAuditLogSheet();
+  setupPhanQuyenSheet();
+  setupNhanSuSheet();
+  setupUngVienSheet();
+
+  // 2. Đặt trigger an toàn (không duplicate)
+  setupTriggers_safe();
+
+  // 3. Ghi flag đã init
+  props.setProperty('SYSTEM_INITIALIZED', 'true');
+  props.setProperty('SYSTEM_INIT_DATE', new Date().toISOString());
+  props.setProperty('SYSTEM_VERSION', '1.0');
+
+  writeAuditLog('CREATE', 'SYSTEM', 'SETUP', '', '', 'v1.0', 'Khởi tạo hệ thống HR lần đầu');
+  Logger.log('✅ Khởi tạo hệ thống hoàn tất!');
+
+  try {
+    SpreadsheetApp.getUi().alert(
+      '✅ Hệ thống HR đã được khởi tạo thành công!\n\n' +
+      'Đã tạo:\n• Sheet AUDIT_LOG\n• Sheet PHAN_QUYEN\n• Sheet NHAN_SU\n• Sheet UNG_VIEN\n\n' +
+      'Trigger tự động:\n• Backup hàng ngày lúc 11pm\n• Nhắc sinh nhật 8am\n• Audit log khi edit\n\n' +
+      'Bước tiếp theo: Thêm email vào sheet PHAN_QUYEN'
+    );
+  } catch (e) {}
+}
+
+/**
+ * Reset flag để có thể chạy setupSystem() lại — chỉ Admin dùng khi cần thiết
+ */
+function resetSystemFlag() {
+  const user = getCurrentUser();
+  if (!hasPermission(user.role, 'ADMIN')) {
+    Logger.log('Chỉ Admin mới reset được system flag');
+    return;
+  }
+  PropertiesService.getScriptProperties().deleteProperty('SYSTEM_INITIALIZED');
+  Logger.log('⚠️ System flag đã được reset. Bạn có thể chạy setupSystem() lại.');
+}
+
+/**
+ * [B-01] setupTriggers_safe() — thay thế setupTriggers()
+ * Kiểm tra từng trigger trước khi tạo để tránh duplicate
+ */
+function setupTriggers_safe() {
+  const ss = SpreadsheetApp.getActive();
+  const existing = ScriptApp.getProjectTriggers();
+
+  const handlerExists = (fn) => existing.some(t => t.getHandlerFunction() === fn);
+
+  // Trigger onEdit (chỉ tạo nếu chưa có)
+  if (!handlerExists('onEditAuditTrigger')) {
+    ScriptApp.newTrigger('onEditAuditTrigger')
+      .forSpreadsheet(ss)
+      .onEdit()
+      .create();
+    Logger.log('✅ Trigger onEditAuditTrigger đã tạo');
+  }
+
+  // Trigger Backup 11pm
+  if (!handlerExists('runDailyBackup')) {
+    ScriptApp.newTrigger('runDailyBackup')
+      .timeBased()
+      .atHour(CONFIG.BACKUP.TIME_HOUR)
+      .everyDays(1)
+      .create();
+    Logger.log('✅ Trigger runDailyBackup đã tạo');
+  }
+
+  // Trigger Birthday 8am
+  if (!handlerExists('runBirthdayReminder')) {
+    ScriptApp.newTrigger('runBirthdayReminder')
+      .timeBased()
+      .atHour(8)
+      .everyDays(1)
+      .create();
+    Logger.log('✅ Trigger runBirthdayReminder đã tạo');
+  }
+
+  // GĐ4 — Probation
+  if (!handlerExists('runProbationChecker')) {
+    ScriptApp.newTrigger('runProbationChecker')
+      .timeBased()
+      .atHour(8)
+      .everyDays(1)
+      .create();
+    Logger.log('✅ Trigger runProbationChecker đã tạo');
+  }
+
+  // GĐ6 — Slack interview reminder
+  if (!handlerExists('runSlackInterviewReminder')) {
+    ScriptApp.newTrigger('runSlackInterviewReminder')
+      .timeBased()
+      .atHour(20)
+      .everyDays(1)
+      .create();
+    Logger.log('✅ Trigger runSlackInterviewReminder đã tạo');
+  }
+}
+
+
+// =============================================================================
+// FIX B-05: XSS — escapeHtml() GLOBAL UTILITY
+// Áp dụng cho MỌI nơi render dữ liệu người dùng vào HTML
+// =============================================================================
+
+/**
+ * Escape HTML entities — dùng cho MỌI string từ user/database trước khi inject vào DOM
+ * @param {*} str
+ * @returns {string}
+ */
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/**
+ * [B-05 FIX] Phiên bản buildMainApp() an toàn — đã escape user.name và user.role
+ * Thay thế buildMainApp() trong GĐ1 và buildFullApp() trong GĐ2
+ */
+function buildSafeUserBadge(user) {
+  // Escape trước khi đưa vào HTML
+  const safeName  = escapeHtml(user.name || 'Unknown');
+  const safeRole  = escapeHtml(user.role || '');
+  const safeEmail = escapeHtml(user.email || '');
+  return { safeName, safeRole, safeEmail };
+}
+
+// Lưu ý: buildFullApp() và buildMainApp() trong GĐ2 cần dùng như sau:
+// TRƯỚC: ${user.name} <span class="badge">${user.role}</span>
+// SAU:   ${escapeHtml(user.name)} <span class="badge">${escapeHtml(user.role)}</span>
+//
+// Tất cả data từ sheet khi đưa vào HTML tbody cũng phải qua escapeHtml():
+// TRƯỚC: <td>${r.Ho_Ten}</td>
+// SAU:   <td>${escapeHtml(r.Ho_Ten)}</td>
+
+
+// =============================================================================
+// FIX B-11: OPTIMISTIC LOCKING — CONCURRENT WRITE PROTECTION
+// =============================================================================
+
+/**
+ * [B-03 + B-11 FIX] updateNhanSu() đã fix:
+ * 1. Optimistic locking: kiểm tra Updated_At trước khi ghi
+ * 2. Batch write: 1 setValues() thay vì N setValue() calls
+ */
+function updateNhanSu_fixed(data, user) {
+  if (!data.id) return { success: false, error: 'Thiếu ID nhân sự' };
+
+  const validation = validateNhanSu(data);
+  if (!validation.valid) {
+    return { success: false, error: validation.errors.join('\n') };
+  }
+
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEETS.NHAN_SU);
+  if (!sheet) return { success: false, error: 'Không tìm thấy sheet NHAN_SU' };
+
+  // Dùng LockService để tránh race condition
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000); // Chờ tối đa 10 giây
+  } catch (e) {
+    return { success: false, error: 'Hệ thống đang bận. Vui lòng thử lại sau vài giây.' };
+  }
+
+  try {
+    const allData  = sheet.getDataRange().getValues();
+    const headers  = allData[0].map(h => h.toString());
+
+    // Map header → column index để tránh magic numbers [B-03]
+    const col = (name) => headers.indexOf(name);
+    const HO_TEN    = col('Ho_Ten');
+    const BO_PHAN   = col('Bo_Phan');
+    const CHUC_VU   = col('Chuc_Vu');
+    const NGAY_VAO  = col('Ngay_Vao');
+    const NGAY_SINH = col('Ngay_Sinh');
+    const SDT       = col('SDT');
+    const EMAIL     = col('Email');
+    const TRANG_THAI= col('Trang_Thai');
+    const LINK_HS   = col('Link_HoSo');
+    const UPDATED_AT= col('Updated_At'); // cột mới — thêm vào sheet nếu chưa có
+    const UPDATED_BY= col('Updated_By');
+
+    for (let i = 1; i < allData.length; i++) {
+      if (allData[i][0] !== data.id) continue;
+
+      // [B-11] Optimistic locking: kiểm tra timestamp
+      if (data.updated_at_check && UPDATED_AT !== -1) {
+        const currentTs = allData[i][UPDATED_AT];
+        const clientTs  = new Date(data.updated_at_check);
+        // Nếu record đã được sửa sau thời điểm client đọc → conflict
+        if (currentTs instanceof Date && clientTs < currentTs) {
+          return {
+            success: false,
+            error: 'Dữ liệu đã bị thay đổi bởi người dùng khác. Vui lòng tải lại trang và thử lại.',
+            conflict: true
+          };
+        }
+      }
+
+      const oldRow = [...allData[i]];
+      const now    = new Date();
+
+      // [B-03] Build entire row, ghi 1 lần bằng setValues()
+      const newRow = [...allData[i]]; // copy row hiện tại
+
+      if (HO_TEN    !== -1 && data.ho_ten    !== undefined) newRow[HO_TEN]    = data.ho_ten;
+      if (BO_PHAN   !== -1 && data.bo_phan   !== undefined) newRow[BO_PHAN]   = data.bo_phan;
+      if (CHUC_VU   !== -1 && data.chuc_vu   !== undefined) newRow[CHUC_VU]   = data.chuc_vu;
+      if (NGAY_VAO  !== -1 && data.ngay_vao  !== undefined) newRow[NGAY_VAO]  = data.ngay_vao ? new Date(data.ngay_vao) : allData[i][NGAY_VAO];
+      if (NGAY_SINH !== -1 && data.ngay_sinh !== undefined) newRow[NGAY_SINH] = data.ngay_sinh ? new Date(data.ngay_sinh) : allData[i][NGAY_SINH];
+      if (SDT       !== -1 && data.sdt       !== undefined) newRow[SDT]       = data.sdt;
+      if (EMAIL     !== -1 && data.email     !== undefined) newRow[EMAIL]      = data.email;
+      if (TRANG_THAI!== -1 && data.trang_thai!== undefined) newRow[TRANG_THAI]= data.trang_thai;
+      if (LINK_HS   !== -1 && data.link_ho_so!== undefined) newRow[LINK_HS]   = data.link_ho_so;
+      if (UPDATED_AT!== -1) newRow[UPDATED_AT] = now;
+      if (UPDATED_BY!== -1) newRow[UPDATED_BY] = user.email;
+
+      // 1 lần ghi duy nhất [B-03 FIX]
+      sheet.getRange(i + 1, 1, 1, newRow.length).setValues([newRow]);
+
+      writeAuditLog('UPDATE', CONFIG.SHEETS.NHAN_SU, data.id, 'multiple',
+        JSON.stringify(oldRow), JSON.stringify(data), `Cập nhật: ${data.ho_ten || ''}`);
+
+      return {
+        success: true,
+        message: `Đã cập nhật thông tin ${data.ho_ten || ''}`,
+        updated_at: now.toISOString()
+      };
+    }
+
+    return { success: false, error: `Không tìm thấy nhân sự với ID: ${data.id}` };
+  } finally {
+    lock.releaseLock(); // Luôn giải phóng lock
+  }
+}
+
+/**
+ * [GĐ2-FIX] Lấy nhân sự theo ID để prefill Edit form
+ */
+function getNhanSuById(id) {
+  if (!id) return { success: false, error: 'Thiếu ID' };
+
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEETS.NHAN_SU);
+  if (!sheet) return { success: false, error: 'Sheet không tồn tại' };
+
+  const data    = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => h.toString());
+
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === id) {
+      const obj = {};
+      headers.forEach((h, idx) => {
+        obj[h] = data[i][idx] instanceof Date ? data[i][idx].toISOString() : data[i][idx];
+      });
+      return { success: true, data: obj };
+    }
+  }
+  return { success: false, error: 'Không tìm thấy nhân sự: ' + id };
+}
+
+/**
+ * [GĐ2-FIX] Advanced filter — lọc nhân sự theo bộ phận và/hoặc trạng thái
+ */
+function getNhanSuFiltered(filters, user) {
+  const allData = getNhanSuList(user); // Đã handle MANAGER scope
+  if (!filters) return allData;
+
+  return allData.filter(r => {
+    let pass = true;
+    if (filters.bo_phan && filters.bo_phan !== '')
+      pass = pass && (r.Bo_Phan === filters.bo_phan);
+    if (filters.trang_thai && filters.trang_thai !== '')
+      pass = pass && (r.Trang_Thai === filters.trang_thai);
+    if (filters.chuc_vu && filters.chuc_vu !== '')
+      pass = pass && (r.Chuc_Vu === filters.chuc_vu);
+    return pass;
+  });
+}
+
+
+// =============================================================================
+// FIX B-12: generateId() DÙNG LockService TRÁNH COLLISION
+// =============================================================================
+
+/**
+ * [B-12 FIX] generateId() thread-safe với LockService
+ * Format: PREFIX-YYYYMMDD-XXXX (counter tăng dần trong ngày, không random)
+ */
+function generateId(prefix) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(5000);
+    const dateStr  = Utilities.formatDate(new Date(), 'Asia/Ho_Chi_Minh', 'yyyyMMdd');
+    const counterKey = 'ID_COUNTER_' + prefix + '_' + dateStr;
+    const props    = PropertiesService.getScriptProperties();
+    const current  = parseInt(props.getProperty(counterKey) || '0') + 1;
+    props.setProperty(counterKey, String(current));
+    return `${prefix}-${dateStr}-${String(current).padStart(4, '0')}`;
+  } catch (e) {
+    // Fallback nếu lock timeout
+    const dateStr = Utilities.formatDate(new Date(), 'Asia/Ho_Chi_Minh', 'yyyyMMdd');
+    return `${prefix}-${dateStr}-${String(Math.floor(Math.random() * 9000) + 1000)}`;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+// =============================================================================
+// FIX B-06: callClaude() VỚI RETRY + EXPONENTIAL BACKOFF
+// =============================================================================
+
+/**
+ * [B-06 FIX] callClaude() với retry logic
+ * Tự động retry tối đa 3 lần khi gặp timeout hoặc rate limit (429)
+ */
+function callClaude(userMessage, systemPrompt, history, maxRetries) {
+  const apiKey    = getApiKey();
+  const retries   = maxRetries !== undefined ? maxRetries : 3;
+  const messages  = [];
+
+  if (history && Array.isArray(history)) {
+    history.forEach(h => messages.push({ role: h.role, content: h.content }));
+  }
+  messages.push({ role: 'user', content: userMessage });
+
+  const payload = {
+    model:      AI_CONFIG.MODEL,
+    max_tokens: AI_CONFIG.MAX_TOKENS,
+    system:     systemPrompt || AI_CONFIG.HR_SYSTEM_PROMPT,
+    messages,
+  };
+
+  const options = {
+    method:      'post',
+    contentType: 'application/json',
+    headers: {
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    payload:            JSON.stringify(payload),
+    muteHttpExceptions: true,
+  };
+
+  let lastError;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = UrlFetchApp.fetch(AI_CONFIG.API_URL, options);
+      const status   = response.getResponseCode();
+      const result   = JSON.parse(response.getContentText());
+
+      // Rate limit (429) hoặc server error (5xx) → retry với backoff
+      if (status === 429 || status >= 500) {
+        const waitMs = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+        Logger.log(`callClaude attempt ${attempt} — HTTP ${status}, retry sau ${waitMs}ms`);
+        if (attempt < retries) {
+          Utilities.sleep(waitMs);
+          continue;
+        }
+        throw new Error(`API trả về HTTP ${status} sau ${retries} lần thử`);
+      }
+
+      if (result.error) throw new Error(result.error.message);
+      return result.content[0].text;
+
+    } catch (e) {
+      lastError = e;
+      Logger.log(`callClaude attempt ${attempt} error: ${e.message}`);
+      if (attempt < retries) {
+        Utilities.sleep(Math.pow(2, attempt) * 500);
+      }
+    }
+  }
+
+  throw lastError || new Error('callClaude() thất bại sau ' + retries + ' lần thử');
+}
+
+
+// =============================================================================
+// FIX B-07: buildHrContext() VỚI CACHE 5 PHÚT
+// =============================================================================
+
+/**
+ * [B-07 FIX] buildHrContext() dùng ScriptCache để tránh 3 lần đọc sheet mỗi chat
+ */
+function buildHrContext() {
+  const CACHE_KEY = 'HR_CONTEXT_CACHE';
+  const cache     = CacheService.getScriptCache();
+
+  // Thử lấy từ cache trước
+  const cached = cache.get(CACHE_KEY);
+  if (cached) {
+    Logger.log('buildHrContext: Cache HIT');
+    return cached;
+  }
+
+  // Cache MISS — build từ sheets
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const lines = [];
+
+  try {
+    const nsSheet = ss.getSheetByName(CONFIG.SHEETS.NHAN_SU);
+    if (nsSheet) {
+      const nsData = nsSheet.getDataRange().getValues().slice(1).filter(r => r[0]);
+      const active = nsData.filter(r => r[8] !== 'Đã nghỉ');
+      const byDept = {};
+      active.forEach(r => { const d = r[2] || 'Chưa phân'; byDept[d] = (byDept[d] || 0) + 1; });
+      lines.push(`NHÂN SỰ: Tổng ${active.length} người đang làm việc.`);
+      lines.push(`Phân bổ bộ phận: ${Object.entries(byDept).map(([k, v]) => `${k}(${v})`).join(', ')}`);
+      lines.push(`Đã nghỉ (lịch sử): ${nsData.length - active.length} người`);
+    }
+  } catch (e) { Logger.log('buildHrContext nsSheet error: ' + e.message); }
+
+  try {
+    const uvSheet = ss.getSheetByName(CONFIG.SHEETS.UNG_VIEN);
+    if (uvSheet) {
+      const uvData    = uvSheet.getDataRange().getValues().slice(1).filter(r => r[0]);
+      const byStatus  = {};
+      uvData.forEach(r => { const s = r[5] || 'Mới nộp'; byStatus[s] = (byStatus[s] || 0) + 1; });
+      lines.push(`TUYỂN DỤNG: ${uvData.length} ứng viên tổng cộng.`);
+      lines.push(`Pipeline: ${Object.entries(byStatus).map(([k, v]) => `${k}(${v})`).join(', ')}`);
+    }
+  } catch (e) { Logger.log('buildHrContext uvSheet error: ' + e.message); }
+
+  try {
+    const bdays = getSinhNhatTuanNay();
+    if (bdays.length > 0) {
+      lines.push(`SINH NHẬT TUẦN NÀY: ${bdays.map(b => b.name + (b.days_until === 0 ? ' (hôm nay)' : ' (' + b.days_until + ' ngày)')).join(', ')}`);
+    }
+  } catch (e) {}
+
+  const context = lines.join('\n') || 'Chưa có dữ liệu trong hệ thống.';
+
+  // Lưu cache 5 phút (300 giây) — invalidate khi có CREATE/UPDATE/DELETE
+  try {
+    cache.put(CACHE_KEY, context, 300);
+  } catch (e) {
+    Logger.log('buildHrContext cache put error: ' + e.message);
+  }
+
+  Logger.log('buildHrContext: Cache SET');
+  return context;
+}
+
+/**
+ * Xóa HR context cache — gọi sau mỗi CREATE/UPDATE/DELETE quan trọng
+ */
+function invalidateHrContextCache() {
+  try {
+    CacheService.getScriptCache().remove('HR_CONTEXT_CACHE');
+  } catch (e) {}
+}
+
+
+// =============================================================================
+// FIX B-17: countWorkDays() TRỪ NGÀY LỄ QUỐC GIA VIỆT NAM
+// =============================================================================
+
+/**
+ * Danh sách ngày nghỉ lễ quốc gia VN (cố định)
+ * Format: "MM-DD" — không phụ thuộc năm
+ * Thêm vào CONFIG nếu muốn customize
+ */
+const VN_PUBLIC_HOLIDAYS_FIXED = [
+  '01-01', // Tết Dương lịch
+  '04-30', // Giải phóng miền Nam
+  '05-01', // Quốc tế Lao động
+  '09-02', // Quốc khánh
+];
+
+/**
+ * Ngày lễ Tết Âm lịch (thay đổi theo năm — cần cập nhật mỗi năm)
+ * Format: "YYYY-MM-DD"
+ */
+const VN_PUBLIC_HOLIDAYS_LUNAR = [
+  // 2026
+  '2026-01-28', '2026-01-29', '2026-01-30', '2026-01-31', '2026-02-01',
+  // 2027 — cập nhật khi cần
+  '2027-02-15', '2027-02-16', '2027-02-17', '2027-02-18', '2027-02-19',
+];
+
+/**
+ * Lấy ngày Giỗ Tổ Hùng Vương theo năm (10/3 Âm lịch — xấp xỉ tháng 4)
+ * Simplified: dùng ngày cố định cho đến khi có lunar calendar library
+ */
+const VN_HUNG_VUONG_BY_YEAR = {
+  2026: '2026-04-07',
+  2027: '2027-03-27',
+};
+
+/**
+ * [B-17 FIX] countWorkDays() — trừ cả ngày lễ quốc gia VN
+ * @param {Date} fromDate
+ * @param {Date} toDate
+ * @returns {number} Số ngày làm việc thực tế
+ */
+function countWorkDays(fromDate, toDate) {
+  const year = fromDate.getFullYear();
+
+  // Build holiday set cho năm tương ứng
+  const holidays = new Set();
+
+  // Ngày lễ cố định
+  VN_PUBLIC_HOLIDAYS_FIXED.forEach(mmdd => {
+    holidays.add(`${year}-${mmdd}`);
+  });
+
+  // Tết Âm lịch
+  VN_PUBLIC_HOLIDAYS_LUNAR.forEach(d => holidays.add(d));
+
+  // Giỗ Tổ Hùng Vương
+  if (VN_HUNG_VUONG_BY_YEAR[year]) {
+    holidays.add(VN_HUNG_VUONG_BY_YEAR[year]);
+  }
+
+  // Đọc thêm từ CONFIG nếu có (HR có thể thêm ngày lễ tùy chỉnh)
+  try {
+    const extraHolidays = PropertiesService.getScriptProperties().getProperty('EXTRA_HOLIDAYS_' + year);
+    if (extraHolidays) {
+      JSON.parse(extraHolidays).forEach(d => holidays.add(d));
+    }
+  } catch (e) {}
+
+  let count = 0;
+  const current = new Date(fromDate);
+  current.setHours(0, 0, 0, 0);
+
+  const end = new Date(toDate);
+  end.setHours(0, 0, 0, 0);
+
+  while (current <= end) {
+    const dow     = current.getDay();
+    const dateStr = Utilities.formatDate(current, 'Asia/Ho_Chi_Minh', 'yyyy-MM-dd');
+
+    // Không tính T7 (6), CN (0), ngày lễ
+    if (dow !== 0 && dow !== 6 && !holidays.has(dateStr)) {
+      count++;
+    }
+
+    current.setDate(current.getDate() + 1);
+  }
+
+  return count;
+}
+
+/**
+ * Admin có thể thêm ngày lễ bổ sung (quyết định bù lễ, nghỉ thêm...)
+ * @param {number} year
+ * @param {string[]} dates - Array "YYYY-MM-DD"
+ */
+function addExtraHolidays(year, dates) {
+  const user = getCurrentUser();
+  if (!hasPermission(user.role, 'ADMIN')) {
+    return { success: false, error: 'Chỉ Admin mới thêm được ngày nghỉ' };
+  }
+  PropertiesService.getScriptProperties()
+    .setProperty('EXTRA_HOLIDAYS_' + year, JSON.stringify(dates));
+  invalidateHrContextCache();
+  return { success: true, year, dates };
+}
+
+
+// =============================================================================
+// FIX B-18: createKpi() VALIDATE TỔNG WEIGHT ≤ 1.0
+// =============================================================================
+
+/**
+ * [B-18 FIX] createKpi() với validation tổng weight
+ */
+function createKpi_fixed(data, user) {
+  // Validation cơ bản (từ GĐ4 giữ nguyên)
+  if (!data.id_nhan_su || !data.kpi_name) {
+    return { success: false, error: 'Thiếu ID nhân sự hoặc tên KPI' };
+  }
+  const weight = parseFloat(data.weight);
+  const target = parseFloat(data.target);
+
+  if (isNaN(target) || target <= 0) {
+    return { success: false, error: 'Mục tiêu (Target) phải là số dương' };
+  }
+  if (isNaN(weight) || weight <= 0 || weight > 1) {
+    return { success: false, error: 'Trọng số (Weight) phải từ 0.01 đến 1.0' };
+  }
+
+  // [B-18] Kiểm tra tổng weight của tất cả KPI trong cùng kỳ không vượt 1.0
+  const period       = data.period || getCurrentPeriod();
+  const existingKpis = getKpiList({ nsId: data.id_nhan_su, period });
+  const totalWeight  = existingKpis.reduce((sum, k) => sum + (parseFloat(k.Weight) || 0), 0);
+
+  if (totalWeight + weight > 1.001) { // dùng 1.001 để tránh floating point rounding
+    const remaining = Math.round((1.0 - totalWeight) * 100) / 100;
+    return {
+      success: false,
+      error: `Tổng trọng số đã là ${Math.round(totalWeight * 100)}%. Bạn chỉ có thể thêm tối đa ${remaining} weight nữa.`,
+      current_total: totalWeight,
+      remaining
+    };
+  }
+
+  // Gọi createKpi() gốc sau khi đã validate
+  return createKpi(data, user);
+}
+
+
+// =============================================================================
+// FIX GĐ3: INTERVIEW SUMMARY — NỐI UI VỚI BACKEND
+// HTML snippet để thêm vào bảng phỏng vấn trong buildFullApp()
+// =============================================================================
+
+/**
+ * Trả về HTML cho cột "AI Tóm tắt" trong bảng phỏng vấn
+ * Thêm dòng này vào renderPhongVanTable() trong GĐ2:
+ *   '<td>' + buildInterviewSummaryBtn(r) + '</td>'
+ */
+function buildInterviewSummaryBtnHtml() {
+  // Đây là snippet JS/HTML để nhúng vào buildFullApp() phần loadPhongVan()
+  return `
+// ─── Interview Summary Button (GĐ3-FIX) ───
+function buildInterviewSummaryBtn(pv) {
+  if (!pv.Ho_Ten_UV) return '—';
+  const hasNotes = pv.Ghi_Chu && pv.Ghi_Chu.trim().length > 10;
+  if (!hasNotes) {
+    return '<span style="color:var(--text-3);font-size:12px">Chưa có ghi chú</span>';
+  }
+  const isAiDone = pv.Ghi_Chu && pv.Ghi_Chu.startsWith('[AI]');
+  if (isAiDone) {
+    return '<span class="status s-chinh-thuc" style="font-size:11px">✅ Đã tóm tắt</span>';
+  }
+  return '<button class="btn btn-ghost btn-sm" style="font-size:11px" ' +
+    'onclick="runInterviewSummary(\\'' + pv.ID_PV + '\\', \\'' +
+    escHtml(pv.Ho_Ten_UV) + '\\', \\'' + escHtml(pv.Vi_Tri_Tuyen || '') + '\\')">' +
+    '🤖 AI Tóm tắt' +
+    '</button>';
+}
+
+function runInterviewSummary(pvId, uvName, vitri) {
+  const pvRow = _pvData.find(r => r.ID_PV === pvId);
+  if (!pvRow || !pvRow.Ghi_Chu) {
+    showToast('Không có ghi chú phỏng vấn để tóm tắt', 'error');
+    return;
+  }
+  showLoading();
+  google.script.run
+    .withSuccessHandler(res => {
+      hideLoading();
+      if (!res.success) { showToast(res.error, 'error'); return; }
+      const d = res.data;
+      const scoreColor = d.overall_rating >= 4 ? '#1D9E75' : d.overall_rating >= 3 ? '#BA7517' : '#C0392B';
+      const msg = 'Tóm tắt hoàn thành! ' +
+        d.decision + ' | Rating: ' + d.overall_rating + '/5';
+      showToast(msg, 'success');
+      loadPhongVan(); // Reload table
+    })
+    .handleRequest({
+      action: 'AI_SUMMARIZE_INTERVIEW',
+      payload: {
+        pvId,
+        notes:  pvRow.Ghi_Chu,
+        uvName,
+        vitri
+      }
+    });
+}`;
+}
+
+/**
+ * Trong loadPhongVan() của GĐ2, thêm cột AI vào thead:
+ * <th>AI</th>
+ *
+ * Và trong tbody render:
+ * '<td>' + buildInterviewSummaryBtn(r) + '</td>'
+ *
+ * Đồng thời trong buildFullApp():
+ * - thead: thêm <th>AI Tóm tắt</th>
+ * - tbody map: thêm <td>${...}</td>
+ */
+
+
+// =============================================================================
+// UNIT TESTS — FIX B-14
+// Chạy runAllTests() để kiểm tra toàn bộ
+// =============================================================================
+
+/**
+ * [B-14 FIX] Test suite cơ bản — chạy trong Apps Script Editor
+ * Tools > Run > runAllTests
+ */
+function runAllTests() {
+  const results = [];
+  let passed = 0;
+  let failed = 0;
+
+  function assert(name, condition, detail) {
+    const ok = !!condition;
+    results.push({ name, ok, detail: ok ? '✅' : '❌ ' + (detail || '') });
+    if (ok) passed++; else failed++;
+    Logger.log((ok ? '✅ PASS' : '❌ FAIL') + ' — ' + name + (detail && !ok ? ' | ' + detail : ''));
+  }
+
+  // ── validateNhanSu ──
+  {
+    const v1 = validateNhanSu({ ho_ten: 'Nguyễn Văn A', bo_phan: 'IT', email: 'test@test.com', sdt: '0912345678', ngay_vao: '2024-01-01' });
+    assert('validateNhanSu — valid input', v1.valid === true);
+
+    const v2 = validateNhanSu({ ho_ten: 'A', bo_phan: '', email: 'not-an-email' });
+    assert('validateNhanSu — invalid input có errors', v2.valid === false && v2.errors.length >= 2);
+
+    const v3 = validateNhanSu({ ho_ten: 'Trẻ em', bo_phan: 'HR', ngay_sinh: new Date(new Date().getFullYear() - 10, 0, 1).toISOString() });
+    assert('validateNhanSu — tuổi < 18 bị reject', v3.valid === false);
+
+    const v4 = validateNhanSu({ ho_ten: 'Future', bo_phan: 'HR', ngay_vao: new Date(new Date().getFullYear() + 1, 0, 1).toISOString() });
+    assert('validateNhanSu — ngày vào tương lai bị reject', v4.valid === false);
+  }
+
+  // ── calcPIT ──
+  {
+    assert('calcPIT — 0 income', calcPIT(0) === 0);
+    assert('calcPIT — 5M income = 5% = 250k', calcPIT(5000000) === 250000);
+    // Bậc 2: 5M × 5% + 5M × 10% = 750k
+    assert('calcPIT — 10M income = 750k', calcPIT(10000000) === 750000);
+    // Trên 80M: tất cả bậc cộng lại
+    const pit80 = calcPIT(80000000);
+    assert('calcPIT — 80M income > 0', pit80 > 0);
+    assert('calcPIT — giá trị dương', pit80 > 10000000);
+  }
+
+  // ── calcSalary ──
+  {
+    const s = calcSalary({ basic_salary: 15000000, allowance: 0, bonus: 0, work_days: 26, standard_days: 26, dependents: 0 });
+    assert('calcSalary — gross_salary = basic khi không phụ cấp', s.gross_salary === 15000000);
+    assert('calcSalary — net < gross', s.net_salary < s.gross_salary);
+    assert('calcSalary — BHXH = 8% basic', s.bhxh_employee === Math.round(15000000 * 0.08));
+    assert('calcSalary — net dương', s.net_salary > 0);
+
+    // Test theo ngày công
+    const s2 = calcSalary({ basic_salary: 26000000, allowance: 0, bonus: 0, work_days: 13, standard_days: 26, dependents: 0 });
+    assert('calcSalary — half work_days → half gross (approx)',
+      Math.abs(s2.gross_salary - 13000000) < 1000 // ±1000đ rounding
+    );
+  }
+
+  // ── hasPermission ──
+  {
+    assert('hasPermission — ADMIN có READ',   hasPermission('ADMIN', 'READ')   === true);
+    assert('hasPermission — ADMIN có WRITE',  hasPermission('ADMIN', 'WRITE')  === true);
+    assert('hasPermission — ADMIN có DELETE', hasPermission('ADMIN', 'DELETE') === true);
+    assert('hasPermission — ADMIN có ADMIN',  hasPermission('ADMIN', 'ADMIN')  === true);
+    assert('hasPermission — VIEWER có READ',  hasPermission('VIEWER', 'READ')  === true);
+    assert('hasPermission — VIEWER không WRITE', hasPermission('VIEWER', 'WRITE') === false);
+    assert('hasPermission — VIEWER không DELETE', hasPermission('VIEWER', 'DELETE') === false);
+    assert('hasPermission — HR có WRITE',    hasPermission('HR', 'WRITE')     === true);
+    assert('hasPermission — HR không DELETE', hasPermission('HR', 'DELETE')   === false);
+    assert('hasPermission — HR không ADMIN',  hasPermission('HR', 'ADMIN')    === false);
+    assert('hasPermission — null role = false', hasPermission(null, 'READ')   === false);
+    assert('hasPermission — unknown role = false', hasPermission('UNKNOWN', 'READ') === false);
+  }
+
+  // ── countWorkDays ──
+  {
+    // Tuần làm việc đầy đủ: 5 ngày (T2–T6)
+    const mon = new Date(2026, 3, 27); // Thứ 2, 27/04/2026
+    const fri = new Date(2026, 3, 30); // Thứ 5 (do 30/4 là lễ!)
+
+    // 28/4 Thứ 3 → 29/4 Thứ 4: 2 ngày (30/4 là lễ, bỏ qua)
+    const d1 = countWorkDays(new Date(2026, 3, 28), new Date(2026, 3, 29));
+    assert('countWorkDays — 2 ngày thường trong tuần', d1 === 2);
+
+    // 30/4 là ngày lễ → không tính
+    const d2 = countWorkDays(new Date(2026, 3, 30), new Date(2026, 3, 30));
+    assert('countWorkDays — 30/4 ngày lễ = 0 ngày', d2 === 0);
+
+    // T7 CN không tính
+    const d3 = countWorkDays(new Date(2026, 3, 25), new Date(2026, 3, 26)); // T7 + CN
+    assert('countWorkDays — T7 CN = 0 ngày', d3 === 0);
+  }
+
+  // ── generateId ──
+  {
+    const id1 = generateId('NS');
+    const id2 = generateId('NS');
+    assert('generateId — format PREFIX-DATE-XXXX', id1.startsWith('NS-') && id1.length >= 14);
+    assert('generateId — 2 ID liên tiếp khác nhau', id1 !== id2);
+  }
+
+  // ── escapeHtml ──
+  {
+    assert('escapeHtml — & escaped', escapeHtml('a & b') === 'a &amp; b');
+    assert('escapeHtml — < > escaped', escapeHtml('<script>') === '&lt;script&gt;');
+    assert('escapeHtml — " escaped', escapeHtml('"test"') === '&quot;test&quot;');
+    assert('escapeHtml — null → empty string', escapeHtml(null) === '');
+    assert('escapeHtml — undefined → empty string', escapeHtml(undefined) === '');
+    assert('escapeHtml — số → string', escapeHtml(123) === '123');
+    // XSS payload phải bị neutralize
+    assert('escapeHtml — XSS neutralized',
+      !escapeHtml('<img src=x onerror=alert(1)>').includes('<img')
+    );
+  }
+
+  // ── validateUngVien ──
+  {
+    const uv1 = validateUngVien({ ho_ten: 'Ứng viên A', vi_tri_tuyen: 'Developer' });
+    assert('validateUngVien — valid', uv1.valid === true);
+
+    const uv2 = validateUngVien({ ho_ten: '', vi_tri_tuyen: '' });
+    assert('validateUngVien — empty fields fail', uv2.valid === false);
+
+    const uv3 = validateUngVien({ ho_ten: 'Test', vi_tri_tuyen: 'Dev', email: 'bad-email' });
+    assert('validateUngVien — bad email fail', uv3.valid === false);
+  }
+
+  // Tóm tắt kết quả
+  Logger.log('');
+  Logger.log('═══════════════════════════════════════');
+  Logger.log(`TEST RESULTS: ${passed} passed, ${failed} failed`);
+  Logger.log('═══════════════════════════════════════');
+
+  if (failed > 0) {
+    Logger.log('\nFailed tests:');
+    results.filter(r => !r.ok).forEach(r => Logger.log('  ❌ ' + r.name + ' — ' + r.detail));
+  }
+
+  // Hiển thị kết quả trong UI nếu chạy từ menu
+  try {
+    SpreadsheetApp.getUi().alert(
+      `Test Results: ${passed}/${passed + failed} passed\n\n` +
+      (failed > 0
+        ? '❌ Failed:\n' + results.filter(r => !r.ok).map(r => '  • ' + r.name).join('\n')
+        : '✅ Tất cả tests passed!')
+    );
+  } catch (e) {}
+
+  return { passed, failed, results };
+}
+
+
+// =============================================================================
+// INVALIDATE CACHE KHI CÓ THAY ĐỔI DỮ LIỆU
+// Thêm dòng này vào createNhanSu(), updateNhanSu_fixed(), deleteNhanSu()
+// sau khi ghi vào sheet:
+//   invalidateHrContextCache();
+// =============================================================================
+
+/**
+ * Override writeAuditLog để tự động invalidate cache sau CREATE/UPDATE/DELETE
+ * Thay thế writeAuditLog() gốc trong GĐ1
+ */
+function writeAuditLog(action, sheetName, rowId, fieldChanged, oldValue, newValue, note) {
+  try {
+    const ss       = SpreadsheetApp.getActiveSpreadsheet();
+    const logSheet = ss.getSheetByName(CONFIG.SHEETS.AUDIT_LOG);
+    if (!logSheet) return;
+
+    const user      = getCurrentUser();
+    const timestamp = new Date();
+
+    const logRow = [
+      timestamp,
+      user.email || 'system',
+      user.role || 'SYSTEM',
+      action,
+      sheetName,
+      rowId || '',
+      fieldChanged || '',
+      oldValue !== undefined ? String(oldValue) : '',
+      newValue !== undefined ? String(newValue) : '',
+      note || '',
+    ];
+
+    logSheet.appendRow(logRow);
+
+    const lastRow     = logSheet.getLastRow();
+    const actionColors = {
+      CREATE: '#EAF3DE',
+      UPDATE: '#FAEEDA',
+      DELETE: '#FCEBEB',
+      LOGIN:  '#E6F1FB',
+      ERROR:  '#FAECE7',
+    };
+    const bgColor = actionColors[action] || '#F1EFE8';
+    logSheet.getRange(lastRow, 1, 1, logRow.length).setBackground(bgColor);
+
+    // [B-07] Invalidate HR context cache khi có thay đổi dữ liệu nhân sự
+    const cacheInvalidationSheets = [
+      CONFIG.SHEETS.NHAN_SU, CONFIG.SHEETS.UNG_VIEN, CONFIG.SHEETS.PHONG_VAN
+    ];
+    if (['CREATE', 'UPDATE', 'DELETE'].includes(action) &&
+        cacheInvalidationSheets.includes(sheetName)) {
+      invalidateHrContextCache();
+    }
+
+  } catch (e) {
+    Logger.log('⚠️ writeAuditLog error: ' + e.message);
+  }
+}
+
+
+// =============================================================================
+// MIGRATION HELPER — Thêm cột Updated_At / Updated_By vào NHAN_SU
+// Chạy 1 lần để migrate schema
+// =============================================================================
+
+/**
+ * Thêm 2 cột Updated_At và Updated_By vào sheet NHAN_SU nếu chưa có
+ * Cần cho B-11 optimistic locking
+ */
+function migrateNhanSuAddUpdatedAt() {
+  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(CONFIG.SHEETS.NHAN_SU);
+  if (!sheet) {
+    Logger.log('Sheet NHAN_SU không tồn tại');
+    return;
+  }
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+  if (!headers.includes('Updated_At')) {
+    const nextCol = sheet.getLastColumn() + 1;
+    sheet.getRange(1, nextCol).setValue('Updated_At');
+    sheet.getRange(1, nextCol).setBackground('#2C2C2A').setFontColor('#FFF').setFontWeight('bold');
+    sheet.getRange(2, nextCol, sheet.getLastRow() - 1, 1)
+      .setNumberFormat('dd/MM/yyyy HH:mm:ss');
+    Logger.log('✅ Đã thêm cột Updated_At vào NHAN_SU');
+  }
+
+  if (!headers.includes('Updated_By')) {
+    const nextCol = sheet.getLastColumn() + 1;
+    sheet.getRange(1, nextCol).setValue('Updated_By');
+    sheet.getRange(1, nextCol).setBackground('#2C2C2A').setFontColor('#FFF').setFontWeight('bold');
+    Logger.log('✅ Đã thêm cột Updated_By vào NHAN_SU');
+  }
+
+  Logger.log('Migration NHAN_SU hoàn tất.');
+}
+
+
+// =============================================================================
+// HƯỚNG DẪN APPLY TẤT CẢ FIXES
+// =============================================================================
+
+/*
+CHECKLIST ÁP DỤNG FIX — theo thứ tự:
+
+[STEP 1 — NGAY LẬP TỨC]
+  • Xóa tất cả hàm handleRequest() ở GĐ1, GĐ2, GĐ4, GĐ5
+  • Chỉ giữ hàm handleRequest() trong file này [B-02 ✅]
+
+[STEP 2 — NGAY LẬP TỨC]
+  • Xóa hàm setupSystem() gốc trong GĐ1
+  • Chỉ giữ setupSystem() trong file này [B-01 ✅]
+  • Xóa setupTriggers() gốc, dùng setupTriggers_safe() thay thế [B-01 ✅]
+
+[STEP 3 — NGAY LẬP TỨC]
+  • Xóa writeAuditLog() gốc trong GĐ1, dùng phiên bản trong file này [B-07 ✅]
+
+[STEP 4 — NGAY LẬP TỨC]
+  • Xóa generateId() gốc trong GĐ1, dùng phiên bản trong file này [B-12 ✅]
+
+[STEP 5 — NGAY LẬP TỨC]
+  • Xóa callClaude() gốc trong GĐ3, dùng phiên bản trong file này [B-06 ✅]
+
+[STEP 6 — NGAY LẬP TỨC]
+  • Xóa buildHrContext() gốc trong GĐ3, dùng phiên bản trong file này [B-07 ✅]
+
+[STEP 7 — NGAY LẬP TỨC]
+  • Xóa countWorkDays() gốc trong GĐ5, dùng phiên bản trong file này [B-17 ✅]
+
+[STEP 8 — SAU ĐÓ]
+  • Trong buildFullApp() (GĐ2): đổi ${user.name} → ${escapeHtml(user.name)}
+    Đổi ${user.role} → ${escapeHtml(user.role)} [B-05 ✅]
+  • Trong tất cả tbody render: bọc r.Ho_Ten, r.Vi_Tri_Tuyen... bằng escapeHtml() [B-05 ✅]
+
+[STEP 9 — SAU ĐÓ]
+  • Chạy hàm migrateNhanSuAddUpdatedAt() để thêm cột Updated_At/Updated_By [B-11 ✅]
+
+[STEP 10 — SAU ĐÓ]
+  • Trong loadPhongVan() (GĐ2): thêm cột AI, dùng buildInterviewSummaryBtnHtml() [GĐ3 ✅]
+
+[STEP 11 — KIỂM TRA]
+  • Chạy runAllTests() — phải pass ≥ 28/28 tests [B-14 ✅]
+
+[STEP 12 — OPTIONAL]
+  • Trong createKpi(): thay createKpi() → createKpi_fixed() trong handleRequest [B-18 ✅]
+  • Trong updateNhanSu(): thay bằng updateNhanSu_fixed() [B-03+B-11 ✅]
+*/
