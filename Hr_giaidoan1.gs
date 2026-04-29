@@ -1,76 +1,54 @@
 // =============================================================================
-// HRIS GIAI ĐOẠN 1 — NỀN TẢNG & BẢO MẬT (ĐÃ UPDATE ĐẦY ĐỦ CHO GĐ4 + GĐ5)
+// HRIS GIAI ĐOẠN 1 — NỀN TẢNG & BẢO MẬT
 // Google Apps Script — Dán toàn bộ file này vào Apps Script Editor
 // Cập nhật: 2026 | Tác giả: HR Analyst System
 // =============================================================================
 // CẤU TRÚC FILE:
-//   MODULE 1 — Cấu hình & Khởi tạo (ĐÃ BỔ SUNG TOÀN BỘ GĐ4 + GĐ5)
-//   MODULE 2 — Xác thực & Phân quyền
-//   MODULE 3 — Audit Log
-//   MODULE 4 — Backup tự động
-//   MODULE 5 — Validation dữ liệu
-//   MODULE 6 — Web App Entry Point
+//   MODULE 1 — Cấu hình & Khởi tạo
+//   MODULE 2 — Xác thực & Phân quyền (Google Account)
+//   MODULE 3 — Audit Log (ghi lại mọi thay đổi)
+//   MODULE 4 — Backup tự động hàng ngày
+//   MODULE 5 — Validation dữ liệu đầu vào
+//   MODULE 6 — Web App Entry Point (doGet)
 // =============================================================================
 
 
 // =============================================================================
-// MODULE 1 — CẤU HÌNH TRUNG TÂM (ĐÃ UPDATE ĐẦY ĐỦ CHO TẤT CẢ GIAI ĐOẠN)
+// MODULE 1 — CẤU HÌNH TRUNG TÂM
+// Chỉnh sửa phần này theo cấu hình thực tế của bạn
 // =============================================================================
 
 const CONFIG = {
   // --- Tên các Sheet trong Spreadsheet ---
   SHEETS: {
-    // Giai đoạn 1
     NHAN_SU:    'NHAN_SU',
     UNG_VIEN:   'UNG_VIEN',
     PHONG_VAN:  'PHONG_VAN',
     TUYEN_DUNG: 'TUYEN_DUNG',
     AUDIT_LOG:  'AUDIT_LOG',
     PHAN_QUYEN: 'PHAN_QUYEN',
-
-    // Giai đoạn 4 — Onboarding & KPI
-    ONBOARDING_TASKS:  'ONBOARDING_TASKS',
-    KPI:               'KPI',
-    PERFORMANCE_REVIEW: 'PERFORMANCE_REVIEW',
-
-    // Giai đoạn 5 — Payroll + Leave + Attendance + Reports
-    PAYROLL:         'PAYROLL',
-    LEAVE_REQUESTS:  'LEAVE_REQUESTS',
-    ATTENDANCE:      'ATTENDANCE',
-    LEAVE_BALANCE:   'LEAVE_BALANCE',
   },
 
   // --- Phân quyền theo role ---
+  // Thêm email người dùng vào đây, hoặc quản lý trong sheet PHAN_QUYEN
   ROLES: {
-    ADMIN:    ['hr.khanhdo@gmail.com'],       // Toàn quyền
-    HR:       ['hr.trungkhanh@gmail.com'],    // Quản lý nhân sự, tuyển dụng, lương
-    MANAGER:  ['hrm.khanhdo@gmail.com'],      // Xem báo cáo bộ phận
-    VIEWER:   [],                             // Chỉ xem
+    ADMIN:    ['hr.khanhdo@gmail.com'],       // Xem + Sửa + Xóa + Quản lý user
+    HR:       ['hr.trungkhanh@gmail.com'],          // Xem + Sửa nhân sự & tuyển dụng
+    MANAGER:  ['hrm.khanhdo@gmail.com'],     // Chỉ xem báo cáo bộ phận mình
+    VIEWER:   [],                          // Chỉ xem (không sửa)
   },
 
   // --- Cài đặt Backup ---
   BACKUP: {
-    FOLDER_NAME: 'HR_Backup',
-    RETENTION_DAYS: 30,
-    TIME_HOUR: 23,
+    FOLDER_NAME: 'HR_Backup',              // Tên thư mục trong Google Drive
+    RETENTION_DAYS: 30,                    // Giữ backup tối đa 30 ngày
+    TIME_HOUR: 23,                         // Chạy backup lúc 23:xx
   },
 
   // --- Cài đặt Notification ---
   NOTIFY: {
-    EMAIL_ALERT: 'hr.khanhdo@gmail.com',
-    SLACK_WEBHOOK: '',
-  },
-
-  // --- Cấu hình Payroll (Giai đoạn 5) ---
-  PAYROLL: {
-    ANNUAL_LEAVE_DAYS: 12,           // Số ngày phép năm mặc định
-    WORKING_DAYS_MONTH: 26,          // Ngày công chuẩn trong tháng
-    BHXH_EMPLOYEE_RATE: 0.08,        // NLĐ đóng BHXH 8%
-    BHXH_EMPLOYER_RATE: 0.175,       // NSDLĐ đóng BHXH 17.5%
-    BHYT_EMPLOYEE_RATE: 0.015,       // BHYT NLĐ 1.5%
-    BHTN_EMPLOYEE_RATE: 0.01,        // BHTN NLĐ 1%
-    PERSONAL_DEDUCTION: 11000000,    // Giảm trừ bản thân 11 triệu
-    DEPENDENT_DEDUCTION: 4400000,    // Giảm trừ người phụ thuộc 4.4 triệu/người
+    EMAIL_ALERT: 'hr@company.com',         // Email nhận cảnh báo hệ thống
+    SLACK_WEBHOOK: '',                     // Dán Slack Webhook URL vào đây (để trống nếu không dùng)
   },
 
   // --- Màu sắc cho status trong sheet ---
@@ -193,6 +171,7 @@ function setupPhanQuyenSheet() {
 
 // =============================================================================
 // MODULE 3 — AUDIT LOG
+// Ghi lại mọi thay đổi: ai sửa gì, lúc nào, sheet nào
 // =============================================================================
 
 /**
@@ -243,6 +222,7 @@ function writeAuditLog(action, sheetName, rowId, fieldChanged, oldValue, newValu
 
   } catch (e) {
     Logger.log('⚠️ writeAuditLog error: ' + e.message);
+    // Không throw error để tránh block flow chính
   }
 }
 
